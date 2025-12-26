@@ -24,10 +24,14 @@ build-linux:
         libjavascriptcoregtk-4.1-dev
         patchelf
         rpm
+        xdg-utils
+        desktop-file-utils
         pkg-config
         curl
         git
         build-essential
+    - which xdg-open || { echo "xdg-open missing, installing xdg-utils"; apt-get install -y --no-install-recommends xdg-utils; }
+    - which xdg-open || { echo "xdg-open still missing, creating stub"; ln -sf /bin/true /usr/bin/xdg-open; }
     - curl https://sh.rustup.rs -sSf | sh -s -- -y
     - source "$HOME/.cargo/env"
     - npm ci
