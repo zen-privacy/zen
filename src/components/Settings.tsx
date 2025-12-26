@@ -121,53 +121,49 @@ export function Settings({
   if (!isOpen) return null
 
   return (
-    <div className="settings-overlay" onClick={handleBackdropClick}>
-      <div className="settings-panel">
-        <div className="settings-header">
+    <div className="modal-overlay" onClick={handleBackdropClick}>
+      <div className="modal-container">
+        <div className="modal-header">
           <h2>Settings</h2>
-          <button className="btn-icon settings-close" onClick={onClose}>
-            &times;
+          <button className="modal-close" onClick={onClose}>
+            ✕
           </button>
         </div>
 
-        <div className="settings-tabs">
+        <div className="modal-tabs">
           <button
-            className={`settings-tab ${activeTab === 'general' ? 'active' : ''}`}
+            className={`modal-tab ${activeTab === 'general' ? 'active' : ''}`}
             onClick={() => setActiveTab('general')}
           >
             General
           </button>
           <button
-            className={`settings-tab ${activeTab === 'logs' ? 'active' : ''}`}
+            className={`modal-tab ${activeTab === 'logs' ? 'active' : ''}`}
             onClick={() => setActiveTab('logs')}
           >
             Logs
           </button>
         </div>
 
-        <div className="settings-content">
+        <div className="modal-content">
           {activeTab === 'general' && (
-            <div className="settings-section">
-              <h3 className="settings-section-title">Security</h3>
+            <div className="modal-section">
+              <h3 className="modal-section-title">Security</h3>
 
-              <div className="settings-item">
-                <div className="settings-item-info">
-                  <div className="settings-item-label">Kill Switch</div>
-                  <div className="settings-item-description">
-                    Block all internet traffic if VPN connection drops unexpectedly.
+              <div className="modal-item">
+                <div className="modal-item-info">
+                  <div className="modal-item-label">Kill Switch</div>
+                  <div className="modal-item-desc">
+                    Block all internet traffic if VPN connection drops.
                     {!killSwitchAvailable && (
-                      <span className="settings-item-warning">
-                        {' '}Not available on this system.
-                      </span>
+                      <span className="text-warning"> Not available.</span>
                     )}
                     {killSwitchAvailable && killSwitchBackend && (
-                      <span className="settings-item-detail">
-                        {' '}Using {killSwitchBackend}.
-                      </span>
+                      <span className="text-muted"> Using {killSwitchBackend}.</span>
                     )}
                   </div>
                 </div>
-                <div className="settings-item-control">
+                <div className="modal-item-control">
                   <label className="toggle-switch">
                     <input
                       type="checkbox"
@@ -181,33 +177,30 @@ export function Settings({
               </div>
 
               {killSwitchEnabled && (
-                <div className="settings-notice">
-                  <span className="settings-notice-icon">!</span>
-                  <span className="settings-notice-text">
-                    Kill switch is active. All traffic is blocked when VPN is disconnected.
-                    {!isConnected && ' Connect to VPN to restore internet access.'}
-                  </span>
+                <div className="modal-notice">
+                  ⚠️ Kill switch active. Traffic blocked when VPN disconnects.
+                  {!isConnected && ' Connect to restore access.'}
                 </div>
               )}
 
-              <h3 className="settings-section-title">Connection</h3>
+              <h3 className="modal-section-title">Connection</h3>
 
-              <div className="settings-item">
-                <div className="settings-item-info">
-                  <div className="settings-item-label">Auto-Reconnect</div>
-                  <div className="settings-item-description">
-                    Automatically reconnect when connection drops. Retries up to 5 times with exponential backoff.
+              <div className="modal-item">
+                <div className="modal-item-info">
+                  <div className="modal-item-label">Auto-Reconnect</div>
+                  <div className="modal-item-desc">
+                    Automatically reconnect when connection drops.
                   </div>
                 </div>
-                <div className="settings-item-control">
-                  <span className="settings-item-badge">Always On</span>
+                <div className="modal-item-control">
+                  <span className="modal-badge">Always On</span>
                 </div>
               </div>
             </div>
           )}
 
           {activeTab === 'logs' && (
-            <div className="settings-section settings-logs">
+            <div className="modal-section modal-logs">
               <LogViewer
                 maxDisplayCount={200}
                 pollInterval={2000}

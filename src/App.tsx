@@ -61,7 +61,6 @@ function App() {
   const [isDownloading, setIsDownloading] = useState(false)
   const [singboxInstalled, setSingboxInstalled] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [ping, setPing] = useState<number | null>(null)
   const [traffic, setTraffic] = useState<TrafficStats | null>(null)
   const [isVisible, setIsVisible] = useState(() => !document.hidden)
   const [lastStatusError, setLastStatusError] = useState<string | null>(null)
@@ -69,10 +68,6 @@ function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [installingUpdate, setInstallingUpdate] = useState(false)
-  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
-    const saved = localStorage.getItem('zen-theme')
-    return (saved as 'dark' | 'light') || 'dark'
-  })
   const [settingsOpen, setSettingsOpen] = useState(false)
 
   const invoke = window.__TAURI__?.core?.invoke
@@ -80,43 +75,23 @@ function App() {
   useEffect(() => {
     checkSetup()
     loadProfiles()
+    // Auto-check for updates on startup
+    handleCheckUpdate()
 
     const handleVisibility = () => setIsVisible(!document.hidden)
     document.addEventListener('visibilitychange', handleVisibility)
     return () => document.removeEventListener('visibilitychange', handleVisibility)
   }, [])
 
-  useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme)
-    localStorage.setItem('zen-theme', theme)
-  }, [theme])
-
-  const toggleTheme = () => {
-    setTheme(prev => prev === 'dark' ? 'light' : 'dark')
-  }
-
-  const copyToClipboard = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text)
-      toast.success('Copied')
-    } catch {
-      toast.error('Failed to copy')
-    }
-  }
-
-  // Reset ping and traffic when disconnected, poll traffic when connected
+  // Poll traffic when connected
   useEffect(() => {
     if (!isConnected || !isVisible) {
-      setPing(null)
       setTraffic(null)
       return
     }
 
-    // Poll traffic stats every second when connected
     const pollTraffic = async () => {
-      if (!invoke) return
-       // Skip background polling when page is hidden to avoid needless work
-      if (document.hidden) return
+      if (!invoke || document.hidden) return
       try {
         const stats = await invoke<TrafficStats>('get_traffic_stats')
         setTraffic(stats)
@@ -130,28 +105,13 @@ function App() {
     return () => clearInterval(interval)
   }, [isConnected, isVisible])
 
-  const handlePing = async () => {
-    if (!invoke || !isConnected) return
-    const profile = profiles.find((p: Profile) => p.id === selectedId)
-    if (!profile) return
-
-    try {
-      const ms = await invoke<number>('ping_server', { address: profile.config.address })
-      setPing(ms)
-    } catch {
-      setPing(null)
-    }
-  }
-
   const checkSetup = async () => {
     if (!invoke) return
     try {
       const status = await invoke<AppStatus>('check_singbox_installed')
       setSingboxInstalled(status.singbox_installed)
     } catch (e) {
-      toast.error('Failed to check setup', {
-        description: String(e),
-      })
+      toast.error('Failed to check setup', { description: String(e) })
     }
   }
 
@@ -164,9 +124,7 @@ function App() {
         setSelectedId(loaded[0].id)
       }
     } catch (e) {
-      toast.error('Failed to load profiles', {
-        description: String(e),
-      })
+      toast.error('Failed to load profiles', { description: String(e) })
     }
   }
 
@@ -217,11 +175,9 @@ function App() {
       setUpdateInfo(info)
       if (info.available) {
         toast.info(`Update ${info.latest_version} available`)
-      } else {
-        toast.success('No updates available')
       }
-    } catch (e) {
-      toast.error('Failed to check updates', { description: String(e) })
+    } catch {
+      // Silently fail on startup check
     } finally {
       setCheckingUpdate(false)
     }
@@ -236,36 +192,16 @@ function App() {
       if (info.downloaded_path) {
         toast.success('Update downloaded', {
           description: info.platform.startsWith('windows')
-            ? 'Installer launched (if allowed)'
+            ? 'Installer launched'
             : `Saved to: ${info.downloaded_path}`,
         })
       } else {
-        toast.error('Download failed or no asset for platform')
+        toast.error('Download failed')
       }
     } catch (e) {
       toast.error('Failed to install update', { description: String(e) })
     } finally {
       setInstallingUpdate(false)
-    }
-  }
-
-  const handleDuplicateProfile = async () => {
-    if (!invoke || !selectedId) return
-    const original = profiles.find((p: Profile) => p.id === selectedId)
-    if (!original) return
-
-    const copy: Profile = {
-      id: crypto.randomUUID(),
-      name: `${original.name} (copy)`,
-      config: { ...original.config, name: `${original.config.name} (copy)` },
-    }
-
-    try {
-      await invoke('save_profile', { profile: copy })
-      await loadProfiles()
-      setSelectedId(copy.id)
-    } catch (e) {
-      setError(String(e))
     }
   }
 
@@ -326,87 +262,29 @@ function App() {
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
   }
 
+  const getStatusClass = () => {
+    if (isConnecting) return 'connecting'
+    if (isConnected) return 'connected'
+    if (lastStatusError) return 'error'
+    return 'idle'
+  }
+
   const getStatusText = () => {
     if (isConnecting) return 'Connecting...'
-    if (isConnected) {
-      return ping !== null ? `Protected • ${ping}ms` : 'Protected'
-    }
+    if (isConnected) return 'Protected'
     if (lastStatusError) return 'Error'
-    return 'Not Connected'
+    return 'Disconnected'
   }
 
-  const statusBadgeClass = () => {
-    if (isConnecting) return 'badge badge-warn'
-    if (isConnected) return 'badge badge-ok'
-    if (lastStatusError) return 'badge badge-error'
-    return 'badge'
-  }
-
-  return (
-    <div className="app">
-      <header className="header">
-        <button
-          className="btn-icon settings-btn"
-          onClick={() => setSettingsOpen(true)}
-          title="Settings"
-        >
-          ⚙️
-        </button>
-        <h1>Zen</h1>
-        <div className="subtitle">Key to Enlightenment</div>
-        <button className="theme-toggle" onClick={toggleTheme} title="Toggle theme">
-          {theme === 'dark' ? '☀️' : '🌙'}
-        </button>
-      </header>
-
-      <div className="connection-status">
-        <div className={`status-indicator ${isConnected ? 'connected' : ''} ${isConnecting ? 'connecting' : ''}`} />
-        <div className="status-info">
-          <div className="status-label">Status</div>
-          <div className={`status-text ${isConnected ? 'connected' : ''}`}>
-            {getStatusText()}
-          </div>
-          <div className={statusBadgeClass()}>
-            {isConnecting ? 'Connecting' : isConnected ? 'Connected' : lastStatusError ? 'Error' : 'Idle'}
-          </div>
-        </div>
-        {isConnected && (
-          <button className="btn-ping" onClick={handlePing}>
-            Ping
-          </button>
-        )}
-      </div>
-
-      {lastStatusError && (
-        <div className="status-error">
-          <div className="status-error-text">{lastStatusError}</div>
-          <button className="btn-secondary" onClick={() => copyToClipboard(lastStatusError)}>
-            Copy error
-          </button>
-        </div>
-      )}
-
-      {isConnected && traffic && (
-        <div className="traffic-stats">
-          <div className="traffic-item">
-            <span className="traffic-arrow down">↓</span>
-            <span className="traffic-label">Download</span>
-            <span className="traffic-value">{formatBytes(traffic.rx_bytes)}</span>
-          </div>
-          <div className="traffic-item">
-            <span className="traffic-arrow up">↑</span>
-            <span className="traffic-label">Upload</span>
-            <span className="traffic-value">{formatBytes(traffic.tx_bytes)}</span>
-          </div>
-        </div>
-      )}
-
-      {!singboxInstalled && (
+  // Setup banner when sing-box not installed
+  if (!singboxInstalled) {
+    return (
+      <div className="app">
         <div className="setup-banner">
-          <h3>Initial Setup Required</h3>
-          <p>Download the VPN engine to get started</p>
+          <h2>Welcome to Zen VPN</h2>
+          <p>Download the VPN engine to start your heist on censorship</p>
           <button
-            className="btn-primary btn-download"
+            className="btn-download"
             onClick={handleDownloadSingbox}
             disabled={isDownloading}
           >
@@ -419,132 +297,161 @@ function App() {
               'Download Engine'
             )}
           </button>
+          {error && <div className="error-message">{error}</div>}
         </div>
-      )}
+      </div>
+    )
+  }
 
-      <div className="card add-profile">
-        <div className="input-group">
-          <input
-            type="text"
-            placeholder="Paste vless:// link"
-            value={linkInput}
-            onChange={(e) => setLinkInput(e.target.value)}
-            onKeyPress={handleKeyPress}
-          />
-          <button className="btn-primary" onClick={handleAddProfile}>
-            Add
+  return (
+    <div className="app">
+      {/* Header */}
+      <header className="header">
+        <h1>
+          <span>Z</span>en <span>V</span>PN
+        </h1>
+        <div className="header-controls">
+          <button 
+            className="btn-icon" 
+            onClick={() => setSettingsOpen(true)}
+            title="Settings"
+          >
+            ⚙️
           </button>
         </div>
-        {error && <div className="error">{error}</div>}
-      </div>
+      </header>
 
-      <div className="profiles-section">
-        <div className="profiles-header">
-          <h3>Profiles</h3>
-        </div>
-
-        {profiles.length === 0 ? (
-          <div className="empty-state">
-            <div className="empty-state-icon">🔐</div>
-            <p>Add a profile to get started</p>
-          </div>
-        ) : (
-          <div className="profiles-list">
-            {profiles.map((profile: Profile) => (
-              <div
-                key={profile.id}
-                className={`profile-item ${selectedId === profile.id ? 'selected' : ''}`}
-                onClick={() => setSelectedId(profile.id)}
-              >
-                <div className="profile-radio" />
-                <div className="profile-info">
-                  <div className="profile-name">{profile.name}</div>
-                  <div className="profile-address">
+      {/* Main Content - 3 Columns */}
+      <main className="main-content">
+        {/* Left Panel - Servers */}
+        <section className="servers-panel">
+          <h2 className="panel-title">Servers</h2>
+          
+          <div className="servers-list">
+            {profiles.length === 0 ? (
+              <div className="empty-state">
+                <div className="empty-state-icon">🔐</div>
+                <p>Add a server to start</p>
+              </div>
+            ) : (
+              profiles.map((profile: Profile) => (
+                <div
+                  key={profile.id}
+                  className={`server-card ${selectedId === profile.id ? 'selected' : ''}`}
+                  onClick={() => setSelectedId(profile.id)}
+                >
+                  <div className="server-name">{profile.name}</div>
+                  <div className="server-address">
                     {profile.config.address}:{profile.config.port}
                   </div>
+                  <button
+                    className="server-delete"
+                    onClick={(e) => handleDeleteProfile(profile.id, e)}
+                  >
+                    ✕
+                  </button>
                 </div>
-                <button
-                  className="btn-icon"
-                  onClick={(e) => handleDeleteProfile(profile.id, e)}
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div className="profiles-actions">
-        <button
-          className="btn-secondary"
-          onClick={handleDuplicateProfile}
-          disabled={!selectedId}
-        >
-          Duplicate
-        </button>
-      </div>
-
-      <div className="card updates-card">
-        <div className="updates-header">
-          <div>
-            <div className="updates-title">Updates</div>
-            <div className="updates-subtitle">
-              {updateInfo
-                ? `Current ${updateInfo.current_version} / Latest ${updateInfo.latest_version}`
-                : 'Check for available updates'}
-            </div>
-          </div>
-          <button
-            className="btn-secondary"
-            onClick={handleCheckUpdate}
-            disabled={checkingUpdate}
-          >
-            {checkingUpdate ? 'Checking...' : 'Check for updates'}
-          </button>
-        </div>
-
-        {updateInfo?.available && (
-          <div className="updates-available">
-            <div className="updates-version">
-              New version {updateInfo.latest_version} ({updateInfo.platform})
-            </div>
-            {updateInfo.notes && <div className="updates-notes">{updateInfo.notes}</div>}
-            <button
-              className="btn-primary"
-              onClick={handleInstallUpdate}
-              disabled={installingUpdate}
-            >
-              {installingUpdate ? 'Installing...' : 'Install'}
-            </button>
-            {updateInfo.downloaded_path && (
-              <div className="updates-path">Saved to: {updateInfo.downloaded_path}</div>
+              ))
             )}
           </div>
-        )}
-      </div>
 
-      <button
-        className={`btn-primary btn-connect ${isConnected ? 'connected' : ''}`}
-        onClick={handleConnect}
-        disabled={isConnecting || (!isConnected && !selectedId) || !singboxInstalled}
-      >
-        {isConnecting ? (
-          <>
-            <span className="spinner" />
-            {isConnected ? 'Disconnecting...' : 'Connecting...'}
-          </>
-        ) : isConnected ? (
-          `Disconnect${currentProfile ? ` (${currentProfile.name})` : ''}`
-        ) : (
-          currentProfile ? `Connect to ${currentProfile.name}` : 'Connect'
-        )}
-      </button>
-      <Toaster theme={theme} />
+          <div className="add-server">
+            <input
+              type="text"
+              placeholder="vless:// link"
+              value={linkInput}
+              onChange={(e) => setLinkInput(e.target.value)}
+              onKeyPress={handleKeyPress}
+            />
+            <button className="btn-add" onClick={handleAddProfile}>
+              Add
+            </button>
+          </div>
+          {error && <div className="error-message">{error}</div>}
+        </section>
+
+        {/* Center Panel - Connect */}
+        <section className="connect-panel">
+          <div className="connect-poster">
+            {/* Mask - clickable connect button */}
+            <div 
+              className={`mask-container ${getStatusClass()}`}
+              onClick={handleConnect}
+              title={isConnected ? 'Click to disconnect' : 'Click to connect'}
+            >
+              <img 
+                src={isConnected ? '/images/mask-two.png' : '/images/mask.png'} 
+                alt={isConnected ? 'Disconnect' : 'Connect'} 
+                className="mask-image" 
+              />
+            </div>
+          </div>
+        </section>
+
+        {/* Right Panel - Settings */}
+        <section className="settings-panel">
+          <div className="settings-card">
+            <h3 className="settings-title">Status</h3>
+            
+            <div className="settings-item">
+              <span className="settings-item-label">Server</span>
+              <span className="settings-item-value">
+                {currentProfile?.name || 'None'}
+              </span>
+            </div>
+
+            <div className="settings-item">
+              <span className="settings-item-label">Connection</span>
+              <span className={`settings-item-value status-${getStatusClass()}`}>
+                {getStatusText()}
+              </span>
+            </div>
+
+            {isConnected && traffic && (
+              <>
+                <div className="settings-item">
+                  <span className="settings-item-label">↓ Download</span>
+                  <span className="settings-item-value traffic-down">
+                    {formatBytes(traffic.rx_bytes)}
+                  </span>
+                </div>
+                <div className="settings-item">
+                  <span className="settings-item-label">↑ Upload</span>
+                  <span className="settings-item-value traffic-up">
+                    {formatBytes(traffic.tx_bytes)}
+                  </span>
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="settings-card updates-section">
+            <h3 className="settings-title">Updates</h3>
+            
+            <button
+              className="btn-update"
+              onClick={updateInfo?.available ? handleInstallUpdate : handleCheckUpdate}
+              disabled={checkingUpdate || installingUpdate}
+            >
+              {checkingUpdate ? 'Checking...' : 
+               installingUpdate ? 'Installing...' :
+               updateInfo?.available ? `Install ${updateInfo.latest_version}` : 
+               'Check Updates'}
+            </button>
+            
+            <div className="version-info">
+              v{updateInfo?.current_version || '0.1.6'}
+              {updateInfo?.available && ` → ${updateInfo.latest_version}`}
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <Toaster theme="dark" />
       <Settings
         isOpen={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        serverIp={selectedId ? profiles.find(p => p.id === selectedId)?.config.address : undefined}
+        serverIp={currentProfile?.config.address}
         isConnected={isConnected}
       />
     </div>

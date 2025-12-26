@@ -1,6 +1,6 @@
 [package]
 name = "zen-vpn"
-version = "0.1.5"
+version = "0.1.6"
 description = "Zen VPN - Simple VLESS client"
 authors = ["you"]
 edition = "2021"
