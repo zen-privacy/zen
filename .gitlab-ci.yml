@@ -52,7 +52,8 @@ build-windows:
   script:
     - git config --global --add safe.directory "$Env:CI_PROJECT_DIR"
     - choco install -y nodejs-lts
-    - refreshenv
+    - $env:PATH = "C:\Program Files\nodejs;$env:PATH"
+    - node --version
     - npm ci
     - npm install -g @tauri-apps/cli
     - rustup default stable
