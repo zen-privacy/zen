@@ -51,8 +51,8 @@ build-windows:
   tags: ["windows"]
   script:
     - git config --global --add safe.directory "$Env:CI_PROJECT_DIR"
-    - choco install -y nodejs-lts rust
-    - $env:PATH = "C:\Program Files\nodejs;C:\ProgramData\chocolatey\lib\rust\tools\bin;$env:PATH"
+    - choco install -y nodejs-lts rust mingw
+    - $env:PATH = "C:\Program Files\nodejs;C:\ProgramData\chocolatey\lib\rust\tools\bin;C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin;$env:PATH"
     - node --version
     - rustc --version
     - cargo --version
