@@ -51,8 +51,14 @@ build-windows:
   tags: ["windows"]
   script:
     - git config --global --add safe.directory "$Env:CI_PROJECT_DIR"
-    - choco install -y nodejs-lts rust mingw
-    - $env:PATH = "C:\Program Files\nodejs;C:\ProgramData\chocolatey\lib\rust\tools\bin;C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin;$env:PATH"
+    - choco install -y nodejs-lts rustup.install
+    - Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"
+    - Update-SessionEnvironment
+    - $env:PATH = "C:\Program Files\nodejs;$env:USERPROFILE\.cargo\bin;$env:PATH"
+    - rustup default stable-x86_64-pc-windows-gnu
+    - rustup target add x86_64-pc-windows-gnu
+    - choco install -y mingw
+    - $env:PATH = "$env:PATH;C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin"
     - node --version
     - rustc --version
     - cargo --version
