@@ -54,7 +54,8 @@ build-windows:
     - choco install -y nodejs-lts
     - $env:PATH = "C:\Program Files\nodejs;$env:PATH"
     - node --version
-    - npm ci
+    - if (Test-Path node_modules) { Remove-Item -Recurse -Force node_modules }
+    - npm ci --prefer-offline
     - npm install -g @tauri-apps/cli
     - rustup default stable
     - npm run tauri build
