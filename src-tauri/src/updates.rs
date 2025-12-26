@@ -16,6 +16,7 @@ struct AssetEntry {
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
+#[allow(dead_code)]
 struct Assets {
     #[serde(default)]
     windows: Option<AssetEntry>,
@@ -105,7 +106,7 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
 }
 
 #[tauri::command]
-pub async fn install_update(app: AppHandle) -> Result<UpdateInfo, String> {
+pub async fn install_update(_app: AppHandle) -> Result<UpdateInfo, String> {
     let info = check_for_update().await?;
     if !info.available {
         return Ok(info);
