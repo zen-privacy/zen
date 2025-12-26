@@ -10,7 +10,7 @@ variables:
 # Linux build (deb + rpm)
 build-linux:
   stage: build
-  image: node:20-bullseye
+  image: node:20-bookworm
   tags: []
   script:
     - apt-get update
@@ -19,6 +19,7 @@ build-linux:
         libayatana-appindicator3-dev
         librsvg2-dev
         libglib2.0-dev
+        libgirepository1.0-dev
         patchelf
         rpm
         pkg-config
