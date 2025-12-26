@@ -482,17 +482,21 @@ async fn get_traffic_stats() -> Result<TrafficStats, String> {
         }
 
         let mut current = adapter_ptr;
+        let mut found_index: Option<u32> = None;
         while !current.is_null() {
             if let Ok(name) = unsafe { (*current).FriendlyName.to_string() } {
                 if name.eq_ignore_ascii_case(TARGET_INTERFACE) {
-                    let index = unsafe { (*current).IfIndex };
-                    break index;
+                    found_index = Some(unsafe { (*current).IfIndex });
+                    break;
                 }
             }
             current = unsafe { (*current).Next };
         }
 
-        return Err("Interface not found".to_string());
+        match found_index {
+            Some(idx) => break idx,
+            None => return Err("Interface not found".to_string()),
+        }
     };
 
     // Query byte counters for the interface

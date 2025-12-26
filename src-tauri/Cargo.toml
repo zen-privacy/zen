@@ -25,6 +25,7 @@ backon = { version = "1", features = ["tokio-sleep"] }
 windows = { version = "0.54", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
 ] }
 semver = "1"
