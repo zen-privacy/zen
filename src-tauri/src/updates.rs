@@ -158,7 +158,7 @@ pub async fn install_update(_app: AppHandle) -> Result<UpdateInfo, String> {
         }
     }
 
-    // Windows: launch NSIS installer in silent mode then exit app
+    // Windows: launch NSIS installer then exit app
     #[cfg(target_os = "windows")]
     {
         if target_path
@@ -167,17 +167,15 @@ pub async fn install_update(_app: AppHandle) -> Result<UpdateInfo, String> {
             .map(|s| s.eq_ignore_ascii_case("exe"))
             .unwrap_or(false)
         {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            // /S = silent install, will still show UAC prompt
-            let result = std::process::Command::new(&target_path)
-                .arg("/S")
-                .creation_flags(CREATE_NO_WINDOW)
+            // Use ShellExecute with "runas" to trigger UAC properly
+            let path_str = target_path.to_string_lossy().to_string();
+            let result = std::process::Command::new("cmd")
+                .args(["/C", "start", "", &path_str])
                 .spawn();
             
             if result.is_ok() {
                 // Give installer a moment to start, then exit app
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                std::thread::sleep(std::time::Duration::from_millis(1000));
                 std::process::exit(0);
             }
         }
