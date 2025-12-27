@@ -151,15 +151,14 @@ pub async fn install_update(_app: AppHandle) -> Result<UpdateInfo, String> {
     if let Some(expected) = info.sha256.as_ref() {
         let actual_hex = format!("{:x}", hasher.finalize());
         if !expected.eq_ignore_ascii_case(&actual_hex) {
-            // Log mismatch but don't fail - GitHub might modify files during upload
-            eprintln!(
-                "SHA256 warning: expected {}, got {}. Proceeding anyway.",
+            return Err(format!(
+                "SHA256 mismatch. Expected {}, got {}",
                 expected, actual_hex
-            );
+            ));
         }
     }
 
-    // Windows: attempt to launch installer
+    // Windows: launch NSIS installer in silent mode then exit app
     #[cfg(target_os = "windows")]
     {
         if target_path
@@ -170,9 +169,17 @@ pub async fn install_update(_app: AppHandle) -> Result<UpdateInfo, String> {
         {
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x08000000;
-            let _ = std::process::Command::new(&target_path)
+            // /S = silent install, will still show UAC prompt
+            let result = std::process::Command::new(&target_path)
+                .arg("/S")
                 .creation_flags(CREATE_NO_WINDOW)
                 .spawn();
+            
+            if result.is_ok() {
+                // Give installer a moment to start, then exit app
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                std::process::exit(0);
+            }
         }
     }
 
