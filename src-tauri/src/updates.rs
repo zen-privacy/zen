@@ -167,13 +167,15 @@ pub async fn install_update(_app: AppHandle) -> Result<UpdateInfo, String> {
             .map(|s| s.eq_ignore_ascii_case("exe"))
             .unwrap_or(false)
         {
-            // Use PowerShell Start-Process with -Verb RunAs for UAC elevation (no -Wait)
+            // Use PowerShell Start-Process with -Verb RunAs for UAC elevation
             let path_str = target_path.to_string_lossy().to_string();
             let result = std::process::Command::new("powershell")
                 .args([
-                    "-NoProfile",
-                    "-Command",
-                    &format!("Start-Process -FilePath '{}' -Verb RunAs", path_str),
+                    "Start-Process",
+                    "-FilePath",
+                    &path_str,
+                    "-Verb",
+                    "RunAs",
                 ])
                 .spawn();
             
