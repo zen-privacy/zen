@@ -5950,8 +5950,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "zen-vpn"
-version = "0.1.6"
+name = "zen-security"
+version = "0.1.7"
 dependencies = [
  "backon",
  "dirs 5.0.1",

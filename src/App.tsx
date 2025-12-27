@@ -58,6 +58,7 @@ function App() {
   const [linkInput, setLinkInput] = useState('')
   const [isConnected, setIsConnected] = useState(false)
   const [isConnecting, setIsConnecting] = useState(false)
+  const [isDisconnecting, setIsDisconnecting] = useState(false)
   const [isDownloading, setIsDownloading] = useState(false)
   const [singboxInstalled, setSingboxInstalled] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -222,15 +223,20 @@ function App() {
 
   const handleConnect = async () => {
     if (!invoke) return
+    if (isConnecting || isDisconnecting) return // Prevent double-click
+    
     setError(null)
-    setIsConnecting(true)
 
     try {
       if (isConnected) {
+        // Disconnecting
+        setIsDisconnecting(true)
         await invoke('stop_singbox')
         setIsConnected(false)
         setLastStatusError(null)
       } else {
+        // Connecting
+        setIsConnecting(true)
         if (!currentProfile) {
           setError('Select a profile first')
           setIsConnecting(false)
@@ -246,6 +252,7 @@ function App() {
       setIsConnected(false)
     } finally {
       setIsConnecting(false)
+      setIsDisconnecting(false)
     }
   }
 
@@ -263,6 +270,7 @@ function App() {
   }
 
   const getStatusClass = () => {
+    if (isDisconnecting) return 'disconnecting'
     if (isConnecting) return 'connecting'
     if (isConnected) return 'connected'
     if (lastStatusError) return 'error'
@@ -270,6 +278,7 @@ function App() {
   }
 
   const getStatusText = () => {
+    if (isDisconnecting) return 'Disconnecting...'
     if (isConnecting) return 'Connecting...'
     if (isConnected) return 'Protected'
     if (lastStatusError) return 'Error'
@@ -384,6 +393,12 @@ function App() {
                 alt={isConnected ? 'Disconnect' : 'Connect'} 
                 className="mask-image" 
               />
+              {(isConnecting || isDisconnecting) && (
+                <div className="mask-waiting-text">
+                  <span>PLEASE WAIT</span>
+                  <span>{isDisconnecting ? 'DISCONNECTING' : 'CONNECTING'}</span>
+                </div>
+              )}
             </div>
           </div>
         </section>
