@@ -102,7 +102,7 @@ function App() {
     }
 
     pollTraffic()
-    const interval = setInterval(pollTraffic, 1000)
+    const interval = setInterval(pollTraffic, 3000) // Reduced frequency: every 3 seconds
     return () => clearInterval(interval)
   }, [isConnected, isVisible])
 

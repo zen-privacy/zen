@@ -203,7 +203,7 @@ export function Settings({
             <div className="modal-section modal-logs">
               <LogViewer
                 maxDisplayCount={200}
-                pollInterval={2000}
+                pollInterval={5000}
                 autoScroll={true}
               />
             </div>

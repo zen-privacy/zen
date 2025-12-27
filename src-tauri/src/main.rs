@@ -441,25 +441,29 @@ async fn ping_server(address: String) -> Result<u64, String> {
 }
 
 #[cfg(target_os = "windows")]
-#[tauri::command]
-async fn get_traffic_stats() -> Result<TrafficStats, String> {
-    use std::mem::zeroed;
+static CACHED_IF_INDEX: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(target_os = "windows")]
+fn find_interface_index() -> Result<u32, String> {
+    use std::sync::atomic::Ordering;
     use windows::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR};
     use windows::Win32::NetworkManagement::IpHelper::{
-        GetAdaptersAddresses, GetIfEntry2, IP_ADAPTER_ADDRESSES_LH, MIB_IF_ROW2,
-        GAA_FLAG_INCLUDE_ALL_INTERFACES,
+        GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH, GAA_FLAG_INCLUDE_ALL_INTERFACES,
     };
     use windows::Win32::Networking::WinSock::AF_UNSPEC;
 
-    // Avoid spawning PowerShell on every poll; query Windows IP Helper API directly.
     const TARGET_INTERFACE: &str = "zen-tun";
 
-    // Allocate buffer for adapter data; Windows may request a larger buffer.
+    // Check cache first
+    let cached = CACHED_IF_INDEX.load(Ordering::Relaxed);
+    if cached != 0 {
+        return Ok(cached);
+    }
+
     let mut buffer_len: u32 = 15_000;
     let mut buffer: Vec<u8> = vec![0; buffer_len as usize];
 
-    // Find the interface index for the zen-tun adapter
-    let if_index = loop {
+    loop {
         let adapter_ptr = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
         let result = unsafe {
             GetAdaptersAddresses(
@@ -472,7 +476,6 @@ async fn get_traffic_stats() -> Result<TrafficStats, String> {
         };
 
         if result == ERROR_BUFFER_OVERFLOW.0 {
-            // Resize buffer and retry with the size Windows reported
             buffer.resize(buffer_len as usize, 0);
             continue;
         }
@@ -482,29 +485,37 @@ async fn get_traffic_stats() -> Result<TrafficStats, String> {
         }
 
         let mut current = adapter_ptr;
-        let mut found_index: Option<u32> = None;
         while !current.is_null() {
             if let Ok(name) = unsafe { (*current).FriendlyName.to_string() } {
                 if name.eq_ignore_ascii_case(TARGET_INTERFACE) {
-                    found_index = Some(unsafe { (*current).Anonymous1.Anonymous.IfIndex });
-                    break;
+                    let idx = unsafe { (*current).Anonymous1.Anonymous.IfIndex };
+                    CACHED_IF_INDEX.store(idx, Ordering::Relaxed);
+                    return Ok(idx);
                 }
             }
             current = unsafe { (*current).Next };
         }
 
-        match found_index {
-            Some(idx) => break idx,
-            None => return Err("Interface not found".to_string()),
-        }
-    };
+        return Err("Interface not found".to_string());
+    }
+}
 
-    // Query byte counters for the interface
+#[cfg(target_os = "windows")]
+#[tauri::command]
+async fn get_traffic_stats() -> Result<TrafficStats, String> {
+    use std::mem::zeroed;
+    use windows::Win32::Foundation::NO_ERROR;
+    use windows::Win32::NetworkManagement::IpHelper::{GetIfEntry2, MIB_IF_ROW2};
+
+    let if_index = find_interface_index()?;
+
     let mut row: MIB_IF_ROW2 = unsafe { zeroed() };
     row.InterfaceIndex = if_index;
 
     let status = unsafe { GetIfEntry2(&mut row) };
     if status != NO_ERROR {
+        // Interface might have been recreated - clear cache and retry
+        CACHED_IF_INDEX.store(0, std::sync::atomic::Ordering::Relaxed);
         return Err(format!("GetIfEntry2 failed: {:?}", status));
     }
 

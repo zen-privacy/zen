@@ -1,6 +1,6 @@
 {
   "name": "singbox-gui",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "description": "GUI client for sing-box VPN",
   "type": "module",
   "scripts": {

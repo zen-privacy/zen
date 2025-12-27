@@ -493,7 +493,7 @@ pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
                 "mtu": 1400,
                 "auto_route": true,
                 "strict_route": false,
-                "stack": "gvisor",
+                "stack": "system",
                 "sniff": true,
                 "sniff_override_destination": false
             }
