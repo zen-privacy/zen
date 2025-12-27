@@ -101,9 +101,12 @@ jobs:
         run: |
           VERSION=$(node -e "console.log(require('./package.json').version)")
           
-          WIN_FILE=$(find artifacts/windows -name "*.exe" -type f | head -n1)
-          DEB_FILE=$(find artifacts/linux -name "*.deb" -type f | head -n1)
-          RPM_FILE=$(find artifacts/linux -name "*.rpm" -type f | head -n1)
+          echo "=== Looking for artifacts ==="
+          find artifacts -type f -ls
+          
+          WIN_FILE=$(find artifacts -name "*.exe" -type f | head -n1)
+          DEB_FILE=$(find artifacts -name "*.deb" -type f | head -n1)
+          RPM_FILE=$(find artifacts -name "*.rpm" -type f | head -n1)
           
           echo "Files found:"
           echo "  WIN: $WIN_FILE"
@@ -148,11 +151,15 @@ jobs:
           echo "=== Generated manifest.json ==="
           cat manifest.json
 
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            artifacts/linux/*
-            artifacts/windows/*
+            artifacts/linux/**/*.deb
+            artifacts/linux/**/*.rpm
+            artifacts/windows/*.exe
             manifest.json
           generate_release_notes: true
