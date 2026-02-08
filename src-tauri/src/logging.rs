@@ -346,38 +346,129 @@ fn is_leap_year(year: u64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
+/// Strip ANSI escape codes from a string
+///
+/// Handles both standard ESC[...m sequences and bare [...m sequences
+/// that sing-box outputs when logging to a file.
+fn strip_ansi_codes(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        // Check for ESC (0x1b) followed by [
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            // Skip ESC[...m sequence
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'm' {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1; // skip 'm'
+            }
+        // Check for bare [ followed by digits/semicolons and m
+        } else if bytes[i] == b'[' {
+            // Look ahead to see if this is an ANSI-like sequence [NNm or [NN;NN;NNm
+            let mut j = i + 1;
+            while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b';') {
+                j += 1;
+            }
+            if j > i + 1 && j < bytes.len() && bytes[j] == b'm' {
+                // This is an ANSI code like [36m or [38;5;178m - skip it
+                i = j + 1;
+            } else {
+                result.push(bytes[i]);
+                i += 1;
+            }
+        } else {
+            result.push(bytes[i]);
+            i += 1;
+        }
+    }
+
+    String::from_utf8(result).unwrap_or_else(|_| s.to_string())
+}
+
 /// Parse a single line of sing-box log output
 ///
-/// Sing-box log format (with timestamp enabled):
+/// Sing-box log formats (various):
 /// `2024-01-15T12:34:56.789+0000 info router: message here`
-/// `2024-01-15T12:34:56.789+0000 debug inbound/tun[tun-in]: message`
-///
-/// Without timestamp (fallback):
+/// `+0300 2026-02-08 07:39:36 INFO network: updated default interface`
 /// `info[0000] message here`
-/// `error message here`
+/// `WARN[0000] message here`
 pub fn parse_singbox_line(line: &str) -> Option<LogEntry> {
     let line = line.trim();
     if line.is_empty() {
         return None;
     }
 
-    // Try to parse timestamped format first: "2024-01-15T12:34:56.789+0000 level component: message"
-    if let Some(entry) = parse_timestamped_line(line) {
+    // Strip ANSI color codes first (sing-box outputs colored logs even to files)
+    let clean = strip_ansi_codes(line);
+    let clean = clean.trim();
+    if clean.is_empty() {
+        return None;
+    }
+
+    // Try to parse offset timestamp format: "+0300 2026-02-08 07:39:36 level message"
+    if let Some(entry) = parse_offset_timestamp_line(clean) {
+        return Some(entry);
+    }
+
+    // Try to parse ISO timestamped format: "2024-01-15T12:34:56.789+0000 level message"
+    if let Some(entry) = parse_timestamped_line(clean) {
         return Some(entry);
     }
 
     // Try to parse bracket format: "level[0000] message"
-    if let Some(entry) = parse_bracket_line(line) {
+    if let Some(entry) = parse_bracket_line(clean) {
         return Some(entry);
     }
 
     // Try to parse simple format: "level message" or "level: message"
-    if let Some(entry) = parse_simple_line(line) {
+    if let Some(entry) = parse_simple_line(clean) {
         return Some(entry);
     }
 
     // Fallback: treat the entire line as an info message
-    Some(LogEntry::from_singbox(LogLevel::Info, line.to_string()))
+    Some(LogEntry::from_singbox(LogLevel::Info, clean.to_string()))
+}
+
+/// Parse offset timestamp format sing-box log line
+/// Format: "+0300 2026-02-08 07:39:36 INFO network: updated default interface"
+/// The timezone offset comes first, then date, then time, then level
+fn parse_offset_timestamp_line(line: &str) -> Option<LogEntry> {
+    // Must start with + or - (timezone offset)
+    if !line.starts_with('+') && !line.starts_with('-') {
+        return None;
+    }
+
+    // Split into parts: ["+0300", "2026-02-08", "07:39:36", "INFO", ...]
+    let parts: Vec<&str> = line.splitn(5, ' ').collect();
+    if parts.len() < 4 {
+        return None;
+    }
+
+    // Validate: parts[0] should be timezone offset like +0300
+    let offset = parts[0];
+    if offset.len() < 4 || !offset[1..].chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+
+    // parts[1] should look like a date (YYYY-MM-DD)
+    if !parts[1].contains('-') || parts[1].len() < 8 {
+        return None;
+    }
+
+    // parts[3] is the log level
+    let level = LogLevel::from_str(parts[3])?;
+
+    let message = if parts.len() > 4 {
+        parts[4].to_string()
+    } else {
+        String::new()
+    };
+
+    Some(LogEntry::from_singbox(level, message))
 }
 
 /// Parse timestamped sing-box log line

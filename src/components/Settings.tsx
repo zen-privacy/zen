@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { toast } from 'sonner'
 import { LogViewer } from './LogViewer'
+import { onKillSwitchChanged } from '../services/notifications'
 
 interface KillSwitchStatus {
   enabled: boolean
@@ -67,11 +68,20 @@ export function Settings({
     }
   }, [invoke])
 
+  // Fetch kill switch status on mount, when modal opens, and when connection state changes
   useEffect(() => {
-    if (isOpen) {
+    fetchKillSwitchStatus()
+  }, [isOpen, isConnected, fetchKillSwitchStatus])
+
+  // Subscribe to kill switch state changes from backend events
+  useEffect(() => {
+    const unsubscribe = onKillSwitchChanged((enabled) => {
+      setKillSwitchEnabled(enabled)
+      // Also refresh full status to get backend/availability info
       fetchKillSwitchStatus()
-    }
-  }, [isOpen, fetchKillSwitchStatus])
+    })
+    return unsubscribe
+  }, [fetchKillSwitchStatus])
 
   const handleKillSwitchToggle = async () => {
     if (!invoke) return
@@ -173,7 +183,7 @@ export function Settings({
                 <div className="modal-item-info">
                   <div className="modal-item-label">Kill Switch</div>
                   <div className="modal-item-desc">
-                    Block all internet traffic if VPN connection drops.
+                    Block all internet traffic if VPN connection drops. Enabled automatically on connect.
                     {!killSwitchAvailable && (
                       <span className="text-warning"> Not available.</span>
                     )}

@@ -34,6 +34,9 @@ pub struct AppStatus {
     pub singbox_installed: bool,
     pub singbox_path: String,
     pub downloading: bool,
+    pub needs_update: bool,
+    pub current_version: String,
+    pub required_version: String,
 }
 
 /// Network traffic statistics

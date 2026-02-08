@@ -152,6 +152,52 @@ fn resolve_server_ip(address: &str) -> String {
     address.to_string()
 }
 
+/// Detect the physical (non-tunnel) network interface on Linux.
+/// This is needed when another VPN/TUN is active — we must route
+/// VPN server traffic through the real physical interface.
+#[cfg(target_os = "linux")]
+fn detect_physical_interface() -> Option<String> {
+    // Parse `ip route show default` to find physical interface
+    let output = std::process::Command::new("ip")
+        .args(["route", "show", "default"])
+        .output()
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut physical_iface = None;
+
+    for line in stdout.lines() {
+        // Each line: "default via X.X.X.X dev IFACE ..."
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if let Some(dev_idx) = parts.iter().position(|&p| p == "dev") {
+            if let Some(iface) = parts.get(dev_idx + 1) {
+                // Skip tunnel/virtual interfaces
+                let is_tunnel = iface.starts_with("tun")
+                    || iface.starts_with("tap")
+                    || iface.starts_with("wg")
+                    || iface.starts_with("tailscale")
+                    || iface.starts_with("utun")
+                    || iface.starts_with("docker")
+                    || iface.starts_with("br-")
+                    || iface.starts_with("veth")
+                    || iface.starts_with("zen-");
+
+                if !is_tunnel {
+                    physical_iface = Some(iface.to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    physical_iface
+}
+
+#[cfg(not(target_os = "linux"))]
+fn detect_physical_interface() -> Option<String> {
+    None // On Windows/macOS, auto_detect_interface works fine
+}
+
 /// Default health check interval for auto-reconnect (5 seconds)
 const HEALTH_CHECK_INTERVAL_MS: u64 = 5000;
 
@@ -283,6 +329,11 @@ async fn attempt_reconnection(
         match reconnect_singbox(&state, &config, &app_handle).await {
             Ok(()) => {
                 state.log(LogLevel::Info, format!("Reconnection successful on attempt {}", attempt));
+
+                // Re-enable kill switch after successful reconnection
+                auto_enable_killswitch(&config.address, &app_handle);
+                state.log(LogLevel::Info, "Kill switch re-enabled after reconnection".to_string());
+
                 vpn_manager.set_state(ConnectionState::Connected);
                 emit_vpn_event(
                     &app_handle,
@@ -310,16 +361,17 @@ async fn attempt_reconnection(
         delay_ms = (delay_ms * 2).min(RECONNECT_MAX_DELAY_MS);
     }
 
-    // Max retries reached
+    // Max retries reached - keep kill switch active to prevent IP leaks
+    // User must explicitly disconnect to disable it
     state.log(
         LogLevel::Error,
-        format!("Reconnection failed after {} attempts", MAX_RECONNECT_ATTEMPTS)
+        format!("Reconnection failed after {} attempts. Kill switch remains active to prevent IP leaks. Disconnect manually to restore network.", MAX_RECONNECT_ATTEMPTS)
     );
     vpn_manager.set_state(ConnectionState::Failed);
     emit_vpn_event(
         &app_handle,
         VpnEvent::error(
-            format!("Reconnection failed after {} attempts", MAX_RECONNECT_ATTEMPTS),
+            format!("Reconnection failed after {} attempts. Network blocked for safety.", MAX_RECONNECT_ATTEMPTS),
             Some("MAX_RETRIES".to_string())
         )
     );
@@ -526,19 +578,49 @@ fn copy_resource_file(app_handle: &AppHandle, filename: &str) -> Result<(), Stri
 /// Generate sing-box configuration JSON from VlessConfig
 #[tauri::command]
 pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
-    let transport = if config.transport_type == "ws" {
+    let mut transport = if config.transport_type == "ws" {
         serde_json::json!({
             "type": "ws",
             "path": config.path,
             "headers": {
                 "Host": config.host
-            }
+            },
+            "max_early_data": 2048,
+            "early_data_header_name": "Sec-WebSocket-Protocol"
         })
     } else {
         serde_json::json!(null)
     };
 
-    let server_ip = resolve_server_ip(&config.address);
+    // Detect Reality configuration from path params (e.g. "pbk=...&sid=...")
+    // This allows using Reality without changing the UI
+    let mut is_reality = false;
+    let mut reality_pbk = String::new();
+    let mut reality_sid = String::new();
+    let mut reality_fp = "chrome".to_string();
+
+    if config.transport_type == "tcp" && config.path.contains("pbk=") {
+        is_reality = true;
+        for pair in config.path.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                match k {
+                    "pbk" => reality_pbk = v.to_string(),
+                    "sid" => reality_sid = v.to_string(),
+                    "fp" => reality_fp = v.to_string(),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // For WS transport, use the domain (host) directly as server address
+    // This makes the connection look like normal HTTPS traffic to DPI
+    // For REALITY/TCP, resolve to IP as before
+    let server_ip = if config.transport_type == "ws" && !config.host.is_empty() {
+        config.host.clone()
+    } else {
+        resolve_server_ip(&config.address)
+    };
 
     // Configure inbounds/inbound[0] based on platform
     let (inet4_address, strict_route, stack) = if cfg!(target_os = "windows") {
@@ -568,15 +650,25 @@ pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
         None
     };
 
+    // Detect physical interface to bypass any other active VPN/TUN
+    let physical_iface = detect_physical_interface();
+
     let mut route_section = serde_json::json!({
         "rules": [
             {
                 "protocol": "dns",
-                "outbound": "dns-out"
+                "action": "hijack-dns"
             },
-            {
-                "ip_cidr": [format!("{}/32", server_ip)],
-                "outbound": "direct"
+            if server_ip.parse::<std::net::IpAddr>().is_ok() {
+                serde_json::json!({
+                    "ip_cidr": [format!("{}/32", server_ip)],
+                    "outbound": "direct"
+                })
+            } else {
+                serde_json::json!({
+                    "domain": [server_ip],
+                    "outbound": "direct"
+                })
             },
             {
                 "ip_is_private": true,
@@ -586,6 +678,11 @@ pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
         "auto_detect_interface": true,
         "final": "proxy"
     });
+
+    // If a physical interface was detected, set it as default to bypass other VPNs
+    if let Some(ref iface) = physical_iface {
+        route_section["default_interface"] = serde_json::json!(iface);
+    }
 
     if routing_mode == "smart" {
         let mut rule_set_entries = vec![];
@@ -627,6 +724,55 @@ pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
         }
     }
 
+    // Configure security/tls
+    let flow = if is_reality { "xtls-rprx-vision" } else { "" };
+    
+    let tls_config = if is_reality {
+        // Reality configuration
+        serde_json::json!({
+            "enabled": true,
+            "server_name": config.host.clone(),
+            "insecure": false,
+            "utls": {
+                "enabled": true,
+                "fingerprint": reality_fp
+            },
+            "reality": {
+                "enabled": true,
+                "public_key": reality_pbk,
+                "short_id": reality_sid
+            }
+        })
+    } else if config.security == "tls" {
+        // Regular TLS configuration (no reality block)
+        serde_json::json!({
+            "enabled": true,
+            "server_name": config.host.clone(),
+            "insecure": false
+        })
+    } else {
+        serde_json::json!(null)
+    };
+
+    // Build proxy outbound - only include transport if it's not null (i.e., for WebSocket)
+    let mut proxy_outbound = serde_json::json!({
+        "type": "vless",
+        "tag": "proxy",
+        "server": server_ip.clone(),
+        "server_port": config.port,
+        "uuid": config.uuid,
+        "tls": tls_config
+    });
+    
+    if !flow.is_empty() {
+        proxy_outbound["flow"] = serde_json::json!(flow);
+    }
+    
+    // Only add transport if it's WebSocket (not null)
+    if config.transport_type == "ws" {
+        proxy_outbound["transport"] = transport;
+    }
+
     let singbox_config = serde_json::json!({
         "log": {
             "level": "debug",
@@ -637,6 +783,7 @@ pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
                 {
                     "tag": "remote",
                     "address": "tls://1.1.1.1",
+                    "address_resolver": "local",
                     "detour": "proxy"
                 },
                 {
@@ -659,7 +806,7 @@ pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
                 "type": "tun",
                 "tag": "tun-in",
                 "interface_name": "zen-tun",
-                "inet4_address": inet4_address,
+                "address": [inet4_address],
                 "mtu": 1400,
                 "auto_route": true,
                 "strict_route": strict_route,
@@ -669,30 +816,10 @@ pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
             }
         ],
         "outbounds": [
-            {
-                "type": "vless",
-                "tag": "proxy",
-                "server": server_ip.clone(),
-                "server_port": config.port,
-                "uuid": config.uuid,
-                "tls": {
-                    "enabled": config.security == "tls",
-                    "server_name": config.host.clone(),
-                    "insecure": false
-                },
-                "transport": transport
-            },
+            proxy_outbound,
             {
                 "type": "direct",
                 "tag": "direct"
-            },
-            {
-                "type": "block",
-                "tag": "block"
-            },
-            {
-                "type": "dns",
-                "tag": "dns-out"
             }
         ],
         "route": route_section
@@ -744,6 +871,45 @@ fn clear_log_file() -> Result<(), String> {
         fs::write(&log_path, "").map_err(|e| format!("Failed to clear log file: {}", e))?;
     }
     Ok(())
+}
+
+/// Auto-enable kill switch to prevent IP leaks when VPN disconnects
+///
+/// This is called automatically after successful VPN connection.
+/// The kill switch firewall rules persist across sing-box crashes,
+/// ensuring traffic is blocked during reconnection gaps.
+/// Only disabled on intentional disconnect via stop_singbox().
+fn auto_enable_killswitch(server_address: &str, app_handle: &AppHandle) {
+    let server_ip = resolve_server_ip(server_address);
+    let killswitch = super::create_killswitch();
+
+    match killswitch.check_availability() {
+        Ok(backend) => {
+            let config = super::KillSwitchConfig {
+                server_ip: server_ip.clone(),
+                tun_interface: "zen-tun".to_string(),
+                singbox_path: get_singbox_binary_path(),
+            };
+
+            match killswitch.enable(&config) {
+                Ok(result) => {
+                    if result.success {
+                        eprintln!("Kill switch auto-enabled ({}) for server {}", backend, server_ip);
+                        // Notify frontend about kill switch state change
+                        emit_vpn_event(app_handle, VpnEvent::killswitch_changed(true));
+                    } else {
+                        eprintln!("Warning: Kill switch enable returned failure: {}", result.message);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to auto-enable kill switch: {}", e);
+                }
+            }
+        }
+        Err(_) => {
+            // Kill switch not available on this platform, skip silently
+        }
+    }
 }
 
 /// Start the sing-box process on Windows
@@ -866,6 +1032,10 @@ pub async fn start_singbox(
                 *process = Some(child);
                 state.log(LogLevel::Info, format!("VPN connected to {}", config.address));
                 emit_vpn_event(&app_handle, VpnEvent::connected(config.name.clone(), config.address.clone()));
+
+                // Auto-enable kill switch to prevent IP leaks on disconnect
+                auto_enable_killswitch(&config.address, &app_handle);
+                state.log(LogLevel::Info, "Kill switch auto-enabled".to_string());
 
                 // Update VpnManager state and start health monitor for auto-reconnect
                 vpn_manager.set_state(ConnectionState::Connected);
@@ -1000,6 +1170,10 @@ pub async fn start_singbox(
                         *process = Some(child);
                         state.log(LogLevel::Info, format!("VPN connected to {}", config.address));
                         emit_vpn_event(&app_handle, VpnEvent::connected(config.name.clone(), config.address.clone()));
+
+                        // Auto-enable kill switch to prevent IP leaks on disconnect
+                        auto_enable_killswitch(&config.address, &app_handle);
+                        state.log(LogLevel::Info, "Kill switch auto-enabled".to_string());
 
                         // Update VpnManager state and start health monitor for auto-reconnect
                         vpn_manager.set_state(ConnectionState::Connected);

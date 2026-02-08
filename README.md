@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="public/images/mask.png" alt="Zen Security" width="120">
+  <img src="public/images/mask.png" alt="Zen Privacy" width="120">
 </p>
 
-<h1 align="center">Zen Security</h1>
+<h1 align="center">Zen Privacy</h1>
 
 <p align="center">
   <strong>Privacy protection client for Windows and Linux</strong>
@@ -33,7 +33,7 @@
 
 ### Windows
 
-Download `ZenSecurity_x.x.x_x64-setup.exe` from [Releases](https://github.com/netsky-prod/zen/releases/latest) and run the installer.
+Download `ZenPrivacy_x.x.x_x64-setup.exe` from [Releases](https://github.com/netsky-prod/zen/releases/latest) and run the installer.
 
 ### Linux
 
@@ -41,15 +41,15 @@ Download from [Releases](https://github.com/netsky-prod/zen/releases/latest):
 
 ```bash
 # Debian / Ubuntu
-sudo dpkg -i zen-security_*_amd64.deb
+sudo dpkg -i zen-privacy_*_amd64.deb
 
 # Fedora / RHEL
-sudo dnf install zen-security-*.x86_64.rpm
+sudo dnf install zen-privacy-*.x86_64.rpm
 ```
 
 ## 🚀 Quick Start
 
-1. **Launch** Zen Security from your applications menu
+1. **Launch** Zen Privacy from your applications menu
 2. **Download Engine** — Click the button on first run (one-time setup)
 3. **Add Server** — Paste your VLESS link and click "Add"
 4. **Connect** — Click the mask to connect
@@ -57,7 +57,7 @@ sudo dnf install zen-security-*.x86_64.rpm
 
 ## 🔄 Auto-Updates
 
-Zen Security checks for updates automatically. When a new version is available:
+Zen Privacy checks for updates automatically. When a new version is available:
 
 1. Go to **Settings** → **Check for Updates**
 2. Click **Install Update**

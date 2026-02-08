@@ -23,7 +23,61 @@ use vpn::{
 };
 use updates::{check_for_update, install_update};
 
-const SINGBOX_VERSION: &str = "1.10.1";
+const SINGBOX_VERSION: &str = "1.12.20";
+
+/// Detect if the system is using a dark theme
+fn detect_dark_theme() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // Check GTK theme via gsettings
+        if let Ok(output) = std::process::Command::new("gsettings")
+            .args(["get", "org.gnome.desktop.interface", "color-scheme"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains("dark") {
+                return true;
+            }
+        }
+        // Fallback: check GTK theme name
+        if let Ok(output) = std::process::Command::new("gsettings")
+            .args(["get", "org.gnome.desktop.interface", "gtk-theme"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
+            if stdout.contains("dark") {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Check Windows registry for dark mode
+        use std::process::Command;
+        if let Ok(output) = Command::new("reg")
+            .args([
+                "query",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+                "/v", "SystemUsesLightTheme",
+            ])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Value 0x0 = dark theme, 0x1 = light theme
+            if stdout.contains("0x0") {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        false
+    }
+}
 
 fn get_config_dir() -> PathBuf {
     dirs::config_dir()
@@ -51,11 +105,37 @@ fn check_singbox_installed() -> AppStatus {
     let singbox_path = get_singbox_binary_path();
     let installed = singbox_path.exists();
 
+    let current_version = if installed {
+        get_installed_singbox_version(&singbox_path)
+    } else {
+        String::new()
+    };
+
+    let needs_update = installed && current_version != SINGBOX_VERSION && !current_version.is_empty();
+
     AppStatus {
         singbox_installed: installed,
         singbox_path: singbox_path.to_string_lossy().to_string(),
         downloading: false,
+        needs_update,
+        current_version,
+        required_version: SINGBOX_VERSION.to_string(),
     }
+}
+
+fn get_installed_singbox_version(path: &PathBuf) -> String {
+    std::process::Command::new(path)
+        .arg("version")
+        .output()
+        .ok()
+        .and_then(|output| {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Parse "sing-box version 1.12.20" -> "1.12.20"
+            stdout.lines().next().and_then(|line| {
+                line.strip_prefix("sing-box version ").map(|v| v.trim().to_string())
+            })
+        })
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -284,24 +364,169 @@ fn parse_vless_link(link: String) -> Result<VlessConfig, String> {
         })
         .collect();
 
+    // Determine security type
+    let security = params
+        .get("security")
+        .cloned()
+        .unwrap_or_else(|| "none".to_string());
+
+    // For Reality, construct path with pbk, sid, fp parameters
+    // This is parsed by generate_singbox_config
+    let path = if security == "reality" {
+        let pbk = params.get("pbk").cloned().unwrap_or_default();
+        let sid = params.get("sid").cloned().unwrap_or_default();
+        let fp = params.get("fp").cloned().unwrap_or_else(|| "chrome".to_string());
+        format!("pbk={}&sid={}&fp={}", pbk, sid, fp)
+    } else {
+        params.get("path").cloned().unwrap_or_default()
+    };
+
+    // For Reality, use sni parameter; otherwise use host
+    let host = params
+        .get("sni")
+        .cloned()
+        .or_else(|| params.get("host").cloned())
+        .unwrap_or_else(|| address.to_string());
+
     Ok(VlessConfig {
         uuid: uuid.to_string(),
         address: address.to_string(),
         port,
-        security: params
-            .get("security")
-            .cloned()
-            .unwrap_or_else(|| "none".to_string()),
+        security,
         transport_type: params
             .get("type")
             .cloned()
             .unwrap_or_else(|| "tcp".to_string()),
-        path: params.get("path").cloned().unwrap_or_default(),
-        host: params
-            .get("host")
-            .cloned()
-            .unwrap_or_else(|| address.to_string()),
+        path,
+        host,
         name,
+        routing_mode: None,
+        target_country: None,
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct SingboxOutbound {
+    #[serde(rename = "type")]
+    outbound_type: String,
+    tag: Option<String>,
+    server: Option<String>,
+    server_port: Option<u16>,
+    uuid: Option<String>,
+    tls: Option<SingboxTls>,
+    transport: Option<SingboxTransport>,
+}
+
+#[derive(serde::Deserialize)]
+struct SingboxTls {
+    enabled: Option<bool>,
+    server_name: Option<String>,
+    reality: Option<SingboxReality>,
+}
+
+#[derive(serde::Deserialize)]
+struct SingboxReality {
+    enabled: Option<bool>,
+    public_key: Option<String>,
+    short_id: Option<String>,
+    fingerprint: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct SingboxTransport {
+    #[serde(rename = "type")]
+    transport_type: Option<String>,
+    path: Option<String>,
+    headers: Option<std::collections::HashMap<String, String>>,
+    service_name: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct SingboxConfig {
+    outbounds: Vec<SingboxOutbound>,
+}
+
+#[tauri::command]
+fn import_config_json(json_content: String) -> Result<VlessConfig, String> {
+    // Try to parse as full config first
+    let outbound = if let Ok(config) = serde_json::from_str::<SingboxConfig>(&json_content) {
+        config
+            .outbounds
+            .into_iter()
+            .find(|o| o.outbound_type == "vless")
+            .ok_or("No vless outbound found in config")?
+    } else if let Ok(outbound) = serde_json::from_str::<SingboxOutbound>(&json_content) {
+        // Try parsing as single outbound object
+        if outbound.outbound_type != "vless" {
+            return Err("Config is not a vless outbound".to_string());
+        }
+        outbound
+    } else {
+        return Err("Invalid JSON format".to_string());
+    };
+
+    let address = outbound.server.ok_or("Missing server address")?;
+    let port = outbound.server_port.ok_or("Missing server port")?;
+    let uuid = outbound.uuid.ok_or("Missing UUID")?;
+
+    let mut security = "none".to_string();
+    let mut path = String::new();
+    let mut host = String::new();
+    let mut transport_type = "tcp".to_string();
+
+    if let Some(tls) = outbound.tls {
+        if tls.enabled.unwrap_or(false) {
+            security = "tls".to_string();
+            if let Some(sni) = tls.server_name {
+                host = sni;
+            }
+
+            if let Some(reality) = tls.reality {
+                if reality.enabled.unwrap_or(false) {
+                    security = "reality".to_string();
+                    // Map Reality fields to path as per application convention
+                    let pbk = reality.public_key.unwrap_or_default();
+                    let sid = reality.short_id.unwrap_or_default();
+                    let fp = reality.fingerprint.unwrap_or_else(|| "chrome".to_string());
+                    path = format!("pbk={}&sid={}&fp={}", pbk, sid, fp);
+                }
+            }
+        }
+    }
+
+    if let Some(transport) = outbound.transport {
+        if let Some(tt) = transport.transport_type {
+            transport_type = tt;
+        }
+        
+        // If NOT reality, use path/headers from transport
+        if security != "reality" {
+            if let Some(p) = transport.path {
+                path = p;
+            } else if let Some(sn) = transport.service_name {
+                // grpc service name
+                path = sn; 
+            }
+            
+            if host.is_empty() {
+                if let Some(headers) = transport.headers {
+                    if let Some(h) = headers.get("Host") {
+                        host = h.clone();
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(VlessConfig {
+        uuid,
+        address,
+        port,
+        security,
+        transport_type,
+        path,
+        host,
+        name: outbound.tag.unwrap_or_else(|| "Imported Server".to_string()),
         routing_mode: None,
         target_country: None,
     })
@@ -750,17 +975,49 @@ fn main() {
         .manage(AppState::default())
         .manage(LogFilterState::default())
         .manage(create_vpn_manager())
+        .invoke_handler(tauri::generate_handler![
+            check_singbox_installed,
+            download_singbox,
+            parse_vless_link,
+            import_config_json,
+            save_profile,
+            load_profiles,
+            delete_profile,
+            start_singbox,
+            stop_singbox,
+            get_traffic_stats,
+            get_connection_status,
+            get_available_rule_sets,
+            get_logs,
+            export_logs,
+            set_log_level,
+            ping_server,
+            enable_killswitch,
+            disable_killswitch,
+            get_killswitch_status,
+            check_for_update,
+            install_update
+        ])
         .setup(|app| {
             // Attempt to recover from previous crash by cleaning up stale killswitch rules
             if let Err(e) = recover_killswitch() {
                 eprintln!("Failed to recover kill switch: {}", e);
             }
 
-            let icon_data = include_bytes!("../icons/icon.png");
-            let icon = Image::from_bytes(icon_data)?;
+            // Choose tray icon based on system theme
+            // Light theme = dark icon (for light backgrounds)
+            // Dark theme = light icon (for dark backgrounds)
+            let icon_light = include_bytes!("../icons/light/icon.png");
+            let icon_dark = include_bytes!("../icons/dark/icon.png");
 
+            let is_dark_theme = detect_dark_theme();
+            let tray_icon_data: &[u8] = if is_dark_theme { icon_dark } else { icon_light };
+            let tray_icon = Image::from_bytes(tray_icon_data)?;
+
+            // Window/taskbar icon also follows system theme
+            let window_icon = Image::from_bytes(tray_icon_data)?;
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_icon(icon.clone());
+                let _ = window.set_icon(window_icon);
             }
 
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -768,9 +1025,9 @@ fn main() {
             let menu = Menu::with_items(app, &[&show, &quit])?;
 
             let _tray = TrayIconBuilder::new()
-                .icon(icon)
+                .icon(tray_icon)
                 .menu(&menu)
-                .tooltip("Zen VPN")
+                .tooltip("Zen Privacy")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => {
                         kill_singbox_sync();
@@ -808,29 +1065,7 @@ fn main() {
                 api.prevent_close();
             }
         })
-        .invoke_handler(tauri::generate_handler![
-            parse_vless_link,
-            generate_singbox_config,
-            save_profile,
-            load_profiles,
-            delete_profile,
-            start_singbox,
-            stop_singbox,
-            get_connection_status,
-            check_singbox_installed,
-            download_singbox,
-            ping_server,
-            get_traffic_stats,
-            get_logs,
-            export_logs,
-            set_log_level,
-            enable_killswitch,
-            disable_killswitch,
-            get_killswitch_status,
-            check_for_update,
-            install_update,
-            get_available_rule_sets,
-        ])
+
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

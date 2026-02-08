@@ -39,17 +39,38 @@ interface VpnReconnectingEvent {
   }
 }
 
+interface VpnKillSwitchChangedEvent {
+  type: 'KillSwitchChanged'
+  data: {
+    enabled: boolean
+  }
+}
+
 type VpnEvent =
   | VpnConnectedEvent
   | VpnDisconnectedEvent
   | VpnErrorEvent
   | VpnReconnectingEvent
+  | VpnKillSwitchChangedEvent
 
 // Event name used by the backend
 const VPN_EVENT_NAME = 'vpn-event'
 
 // Store the unlisten function for cleanup
 let unlistenFn: (() => void) | null = null
+
+// Callback for kill switch state changes (subscribed by Settings component)
+type KillSwitchCallback = (enabled: boolean) => void
+const killSwitchCallbacks: Set<KillSwitchCallback> = new Set()
+
+/**
+ * Subscribe to kill switch state changes.
+ * Returns an unsubscribe function.
+ */
+export function onKillSwitchChanged(callback: KillSwitchCallback): () => void {
+  killSwitchCallbacks.add(callback)
+  return () => killSwitchCallbacks.delete(callback)
+}
 
 /**
  * Handle incoming VPN events and display appropriate toast notifications
@@ -83,6 +104,17 @@ function handleVpnEvent(event: VpnEvent): void {
         duration: 3000,
         id: 'vpn-reconnecting', // Use stable ID to update existing toast
       })
+      break
+
+    case 'KillSwitchChanged':
+      if (event.data.enabled) {
+        toast.info('Kill Switch', {
+          description: 'Auto-enabled to prevent IP leaks',
+          duration: 3000,
+        })
+      }
+      // Notify subscribers (Settings component)
+      killSwitchCallbacks.forEach((cb) => cb(event.data.enabled))
       break
   }
 }

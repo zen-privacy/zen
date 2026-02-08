@@ -1076,3 +1076,123 @@ body {
   opacity: 0.8 !important;
   font-size: 0.85rem !important;
 }
+
+/* Import Modal Styles */
+.import-textarea {
+  width: 100%;
+  padding: 12px;
+  background: rgba(0,0,0,0.3);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 4px;
+  color: #ddd;
+  font-family: 'Courier New', monospace;
+  font-size: 0.85rem;
+  resize: vertical;
+  margin-top: 8px;
+  min-height: 200px;
+}
+
+.import-textarea:focus {
+  outline: none;
+  border-color: var(--red-primary);
+  background: rgba(0,0,0,0.5);
+}
+
+.modal-body {
+  padding: 20px;
+  color: #ccc;
+}
+
+.modal-footer {
+  padding: 16px 20px;
+  border-top: 1px solid rgba(255,255,255,0.1);
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  background: rgba(0,0,0,0.2);
+}
+
+.btn-primary {
+  padding: 8px 24px;
+  background: var(--red-primary);
+  border: none;
+  border-radius: 4px;
+  color: white;
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: 1rem;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-primary:hover {
+  background: var(--red-light);
+  transform: translateY(-1px);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-secondary {
+  padding: 8px 16px;
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 4px;
+  color: #aaa;
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: 1rem;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-secondary:hover {
+  border-color: #fff;
+  color: #fff;
+}
+
+.btn-close {
+  background: none;
+  border: none;
+  color: white;
+  font-size: 1.2rem;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+}
+
+.btn-close:hover {
+  opacity: 1;
+}
+
+.btn-import-json {
+  width: 100%;
+  margin-top: 12px;
+  padding: 10px;
+  background: rgba(255,255,255,0.05);
+  border: 1px dashed rgba(255,255,255,0.2);
+  border-radius: 4px;
+  color: rgba(255,255,255,0.7);
+  font-family: 'Special Elite', monospace;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-import-json:hover {
+  background: rgba(255,255,255,0.1);
+  border-color: var(--red-primary);
+  color: white;
+}
+
+.error-message-modal {
+  margin-top: 8px;
+  color: var(--red-light);
+  font-size: 0.85rem;
+  background: rgba(255,0,0,0.1);
+  padding: 8px;
+  border-radius: 4px;
+}

@@ -1,7 +1,7 @@
 [package]
-name = "zen-security"
-version = "1.0.5"
-description = "Zen Security - Privacy protection client"
+name = "zen-privacy"
+version = "1.0.6"
+description = "Zen Privacy - Privacy protection client"
 authors = ["you"]
 edition = "2021"
 

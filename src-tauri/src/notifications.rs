@@ -38,6 +38,11 @@ pub enum VpnEvent {
         /// Maximum number of attempts
         max_attempts: u32,
     },
+    /// Kill switch state changed (auto-enabled or disabled)
+    KillSwitchChanged {
+        /// Whether the kill switch is now enabled
+        enabled: bool,
+    },
 }
 
 impl VpnEvent {
@@ -70,6 +75,11 @@ impl VpnEvent {
         }
     }
 
+    /// Create a KillSwitchChanged event
+    pub fn killswitch_changed(enabled: bool) -> Self {
+        VpnEvent::KillSwitchChanged { enabled }
+    }
+
     /// Get the event type as a string for logging purposes
     pub fn event_type(&self) -> &'static str {
         match self {
@@ -77,6 +87,7 @@ impl VpnEvent {
             VpnEvent::Disconnected { .. } => "disconnected",
             VpnEvent::Error { .. } => "error",
             VpnEvent::Reconnecting { .. } => "reconnecting",
+            VpnEvent::KillSwitchChanged { .. } => "killswitch_changed",
         }
     }
 }

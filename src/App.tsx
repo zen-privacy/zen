@@ -41,6 +41,9 @@ interface AppStatus {
   singbox_installed: boolean
   singbox_path: string
   downloading: boolean
+  needs_update: boolean
+  current_version: string
+  required_version: string
 }
 
 interface TrafficStats {
@@ -68,6 +71,8 @@ function App() {
   const [isDisconnecting, setIsDisconnecting] = useState(false)
   const [isDownloading, setIsDownloading] = useState(false)
   const [singboxInstalled, setSingboxInstalled] = useState(true)
+  const [singboxNeedsUpdate, setSingboxNeedsUpdate] = useState(false)
+  const [singboxVersionInfo, setSingboxVersionInfo] = useState({ current: '', required: '' })
   const [error, setError] = useState<string | null>(null)
   const [traffic, setTraffic] = useState<TrafficStats | null>(null)
   const [isVisible, setIsVisible] = useState(() => !document.hidden)
@@ -78,6 +83,8 @@ function App() {
   const [installingUpdate, setInstallingUpdate] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [ruleSets, setRuleSets] = useState<RuleSetInfo[]>([])
+  const [importModalOpen, setImportModalOpen] = useState(false)
+  const [importContent, setImportContent] = useState('')
 
   const invoke = window.__TAURI__?.core?.invoke
 
@@ -120,6 +127,8 @@ function App() {
     try {
       const status = await invoke<AppStatus>('check_singbox_installed')
       setSingboxInstalled(status.singbox_installed)
+      setSingboxNeedsUpdate(status.needs_update)
+      setSingboxVersionInfo({ current: status.current_version, required: status.required_version })
     } catch (e) {
       toast.error('Failed to check setup', { description: String(e) })
     }
@@ -152,10 +161,10 @@ function App() {
     if (!invoke || !currentProfile) return
     const updatedConfig = { ...currentProfile.config, [key]: value }
     const updatedProfile = { ...currentProfile, config: updatedConfig }
-    
+
     // Update local state immediately
     setProfiles(prev => prev.map(p => p.id === currentProfile.id ? updatedProfile : p))
-    
+
     try {
       await invoke('save_profile', { profile: updatedProfile })
     } catch (e) {
@@ -171,10 +180,49 @@ function App() {
     try {
       await invoke<string>('download_singbox')
       setSingboxInstalled(true)
+      setSingboxNeedsUpdate(false)
     } catch (e) {
       setError(String(e))
     } finally {
       setIsDownloading(false)
+    }
+  }
+
+  const handleImport = async () => {
+    if (!invoke || !importContent.trim()) return
+    setError(null)
+
+    try {
+      let config: VlessConfig
+      const content = importContent.trim()
+
+      if (content.startsWith('{')) {
+        // Assume JSON
+        config = await invoke<VlessConfig>('import_config_json', { jsonContent: content })
+      } else {
+        // Assume Link
+        config = await invoke<VlessConfig>('parse_vless_link', { link: content })
+      }
+
+      if (!config.address || !config.uuid || !config.port || config.port < 1 || config.port > 65535) {
+        setError('Invalid profile data')
+        return
+      }
+
+      const profile: Profile = {
+        id: crypto.randomUUID(),
+        name: config.name || 'Imported Profile',
+        config,
+      }
+
+      await invoke('save_profile', { profile })
+      setImportContent('')
+      setImportModalOpen(false)
+      await loadProfiles()
+      setSelectedId(profile.id)
+      toast.success('Profile imported successfully')
+    } catch (e) {
+      setError(String(e))
     }
   }
 
@@ -258,7 +306,7 @@ function App() {
   const handleConnect = async () => {
     if (!invoke) return
     if (isConnecting || isDisconnecting) return // Prevent double-click
-    
+
     setError(null)
 
     try {
@@ -319,13 +367,17 @@ function App() {
     return 'Disconnected'
   }
 
-  // Setup banner when sing-box not installed
-  if (!singboxInstalled) {
+  // Setup banner when sing-box not installed or needs update
+  if (!singboxInstalled || singboxNeedsUpdate) {
     return (
       <div className="app">
         <div className="setup-banner">
-          <h2>Welcome to Zen Security</h2>
-          <p>Download the VPN engine to start your heist on censorship</p>
+          <h2>{singboxNeedsUpdate ? 'Update Required' : 'Welcome to Zen Privacy'}</h2>
+          <p>
+            {singboxNeedsUpdate
+              ? `VPN engine v${singboxVersionInfo.current} is incompatible. Version ${singboxVersionInfo.required} required.`
+              : 'Download the VPN engine to start your heist on censorship'}
+          </p>
           <button
             className="btn-download"
             onClick={handleDownloadSingbox}
@@ -334,10 +386,10 @@ function App() {
             {isDownloading ? (
               <>
                 <span className="spinner" />
-                Downloading...
+                {singboxNeedsUpdate ? 'Updating...' : 'Downloading...'}
               </>
             ) : (
-              'Download Engine'
+              singboxNeedsUpdate ? `Update to v${singboxVersionInfo.required}` : 'Download Engine'
             )}
           </button>
           {error && <div className="error-message">{error}</div>}
@@ -351,11 +403,11 @@ function App() {
       {/* Header */}
       <header className="header">
         <h1>
-          <span>Z</span>en <span>S</span>ecurity
+          <span>Z</span>en <span>P</span>rivacy
         </h1>
         <div className="header-controls">
-          <button 
-            className="btn-icon" 
+          <button
+            className="btn-icon"
             onClick={() => setSettingsOpen(true)}
             title="Settings"
           >
@@ -369,7 +421,7 @@ function App() {
         {/* Left Panel - Servers */}
         <section className="servers-panel">
           <h2 className="panel-title">Servers</h2>
-          
+
           <div className="servers-list">
             {profiles.length === 0 ? (
               <div className="empty-state">
@@ -410,6 +462,10 @@ function App() {
               Add
             </button>
           </div>
+
+          <button className="btn-import-json" onClick={() => setImportModalOpen(true)}>
+            Import Config (JSON)
+          </button>
           {error && <div className="error-message">{error}</div>}
         </section>
 
@@ -417,15 +473,15 @@ function App() {
         <section className="connect-panel">
           <div className="connect-poster">
             {/* Mask - clickable connect button */}
-            <div 
+            <div
               className={`mask-container ${getStatusClass()}`}
               onClick={handleConnect}
               title={isConnected ? 'Click to disconnect' : 'Click to connect'}
             >
-              <img 
-                src={isConnected ? '/images/mask-two.png' : '/images/mask.png'} 
-                alt={isConnected ? 'Disconnect' : 'Connect'} 
-                className="mask-image" 
+              <img
+                src={isConnected ? '/images/mask-two.png' : '/images/mask.png'}
+                alt={isConnected ? 'Disconnect' : 'Connect'}
+                className="mask-image"
               />
               {(isConnecting || isDisconnecting) && (
                 <div className="mask-waiting-text">
@@ -441,7 +497,7 @@ function App() {
         <section className="settings-panel">
           <div className="settings-card">
             <h3 className="settings-title">Status</h3>
-            
+
             <div className="settings-item">
               <span className="settings-item-label">Server</span>
               <span className="settings-item-value">
@@ -476,18 +532,18 @@ function App() {
 
           <div className="settings-card updates-section">
             <h3 className="settings-title">Updates</h3>
-            
+
             <button
               className="btn-update"
               onClick={updateInfo?.available ? handleInstallUpdate : handleCheckUpdate}
               disabled={checkingUpdate || installingUpdate}
             >
-              {checkingUpdate ? 'Checking...' : 
-               installingUpdate ? 'Installing...' :
-               updateInfo?.available ? `Install ${updateInfo.latest_version}` : 
-               'Check Updates'}
+              {checkingUpdate ? 'Checking...' :
+                installingUpdate ? 'Installing...' :
+                  updateInfo?.available ? `Install ${updateInfo.latest_version}` :
+                    'Check Updates'}
             </button>
-            
+
             <div className="version-info">
               v{updateInfo?.current_version || '0.1.6'}
               {updateInfo?.available && ` → ${updateInfo.latest_version}`}
@@ -506,6 +562,49 @@ function App() {
         currentConfig={currentProfile?.config}
         onUpdateConfig={handleUpdateConfig}
       />
+
+      {/* Import Modal */}
+      {importModalOpen && (
+        <div className="modal-overlay">
+          <div className="modal-content">
+            <div className="modal-header">
+              <h3>Import Configuration</h3>
+              <button
+                className="btn-close"
+                onClick={() => setImportModalOpen(false)}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="modal-body">
+              <p>Paste a VLESS link or Sing-box JSON config:</p>
+              <textarea
+                value={importContent}
+                onChange={(e) => setImportContent(e.target.value)}
+                placeholder='vless://... or {"outbounds": [...] }'
+                className="import-textarea"
+                rows={10}
+              />
+              {error && <div className="error-message-modal">{error}</div>}
+            </div>
+            <div className="modal-footer">
+              <button
+                className="btn-secondary"
+                onClick={() => setImportModalOpen(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn-primary"
+                onClick={handleImport}
+                disabled={!importContent.trim()}
+              >
+                Import
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
