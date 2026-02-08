@@ -764,7 +764,8 @@ pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
                 "enabled": true,
                 "server_name": if config.host.is_empty() { config.address.clone() } else { config.host.clone() },
                 "insecure": false
-            }
+            },
+            "keep_alive_interval": "10s"
         });
         if let Some(up) = config.up_mbps {
             ob["up_mbps"] = serde_json::json!(up);
@@ -2095,6 +2096,7 @@ mod tests {
         assert_eq!(proxy["password"], "mypassword");
         assert_eq!(proxy["tls"]["enabled"], true);
         assert_eq!(proxy["tls"]["server_name"], "sni.example.com");
+        assert_eq!(proxy["keep_alive_interval"], "10s");
         // No uuid field for hysteria2
         assert!(proxy.get("uuid").is_none());
     }
