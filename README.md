@@ -19,17 +19,20 @@
 
 ---
 
-## ✨ Features
+## Features
 
-- 🔒 **VLESS Protocol** — Modern, lightweight proxy protocol with WebSocket transport
-- 🌐 **TUN Mode** — Routes all system traffic through encrypted tunnel
-- ⚡ **Auto-updates** — Built-in update mechanism with one-click installation
-- 🎨 **Beautiful UI** — La Casa de Papel inspired design
-- 📊 **Traffic Stats** — Real-time upload/download monitoring
-- 🖥️ **Cross-platform** — Windows and Linux support
-- 🔧 **Auto-download Engine** — sing-box core downloaded automatically
+- **VLESS Protocol** — VLESS with Reality, WebSocket+TLS transport
+- **Hysteria2 Protocol** — QUIC-based protocol with optional obfuscation
+- **TUN Mode** — Routes all system traffic through encrypted tunnel
+- **Kill Switch** — Blocks traffic on VPN disconnect to prevent IP leaks
+- **Auto-reconnect** — Automatic reconnection with exponential backoff
+- **Smart Routing** — Country-based rule sets for selective proxying
+- **Traffic Stats** — Real-time upload/download monitoring
+- **Auto-updates** — Built-in update mechanism with one-click installation
+- **Cross-platform** — Windows and Linux support
+- **Auto-download Engine** — sing-box core downloaded automatically
 
-## 📥 Installation
+## Installation
 
 ### Windows
 
@@ -47,15 +50,15 @@ sudo dpkg -i zen-privacy_*_amd64.deb
 sudo dnf install zen-privacy-*.x86_64.rpm
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
 1. **Launch** Zen Privacy from your applications menu
 2. **Download Engine** — Click the button on first run (one-time setup)
-3. **Add Server** — Paste your VLESS link and click "Add"
+3. **Add Server** — Paste a `vless://` or `hysteria2://` link, or import a sing-box JSON config
 4. **Connect** — Click the mask to connect
 5. **Enjoy** — Your traffic is now protected
 
-## 🔄 Auto-Updates
+## Auto-Updates
 
 Zen Privacy checks for updates automatically. When a new version is available:
 
@@ -63,7 +66,7 @@ Zen Privacy checks for updates automatically. When a new version is available:
 2. Click **Install Update**
 3. The new version will be downloaded and installed automatically
 
-## 🛠️ Building from Source
+## Building from Source
 
 ### Requirements
 
@@ -84,7 +87,7 @@ npm run tauri dev
 npm run tauri build
 ```
 
-## 📋 Linux Notes
+## Linux Notes
 
 ### GNOME Tray Support
 
@@ -94,7 +97,7 @@ GNOME hides tray icons by default. To enable:
 2. Enable "AppIndicator and KStatusNotifierItem Support" extension
 3. Restart GNOME Shell
 
-## 📄 License
+## License
 
 This project is licensed under [Creative Commons Attribution-NonCommercial 4.0 International](LICENSE).
 
