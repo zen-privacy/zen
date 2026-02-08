@@ -17,5 +17,5 @@ fn main() {
 </assembly>"#),
     );
 
-    tauri_build::build_with_attributes(attrs);
+    tauri_build::try_build(attrs).expect("failed to run tauri_build");
 }
