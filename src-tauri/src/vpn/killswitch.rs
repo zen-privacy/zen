@@ -110,6 +110,8 @@ pub enum FirewallBackend {
     Iptables,
     /// Windows netsh advfirewall
     Netsh,
+    /// macOS pf (Packet Filter)
+    Pf,
     /// No firewall backend available
     None,
 }
@@ -120,6 +122,7 @@ impl std::fmt::Display for FirewallBackend {
             FirewallBackend::Nftables => write!(f, "nftables"),
             FirewallBackend::Iptables => write!(f, "iptables"),
             FirewallBackend::Netsh => write!(f, "netsh"),
+            FirewallBackend::Pf => write!(f, "pf"),
             FirewallBackend::None => write!(f, "none"),
         }
     }
@@ -200,10 +203,25 @@ pub fn detect_firewall_backend() -> FirewallBackend {
         detect_linux_backend()
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        detect_macos_backend()
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
         FirewallBackend::None
     }
+}
+
+/// Detect the firewall backend on macOS
+#[cfg(target_os = "macos")]
+fn detect_macos_backend() -> FirewallBackend {
+    // pf is always available on macOS (built-in)
+    if check_command_exists("pfctl") {
+        return FirewallBackend::Pf;
+    }
+    FirewallBackend::None
 }
 
 /// Detect the firewall backend on Linux
@@ -1140,24 +1158,289 @@ pub fn create_killswitch() -> Box<dyn KillSwitch> {
         Box::new(WindowsKillSwitch::new())
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(MacOSKillSwitch::new())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
         Box::new(NoOpKillSwitch::new())
     }
 }
 
+// ─── macOS Kill Switch (pf - Packet Filter) ────────────────────────────────
+
+#[cfg(target_os = "macos")]
+pub struct MacOSKillSwitch {
+    state: KillSwitchState,
+}
+
+#[cfg(target_os = "macos")]
+impl MacOSKillSwitch {
+    /// Anchor name used in pf rules
+    const PF_ANCHOR: &'static str = "com.zen.vpn";
+
+    pub fn new() -> Self {
+        Self {
+            state: KillSwitchState::default(),
+        }
+    }
+
+    pub fn with_backend(backend: FirewallBackend) -> Self {
+        Self {
+            state: KillSwitchState::new(backend),
+        }
+    }
+
+    /// Execute a shell command
+    fn run_command(&self, cmd: &str) -> Result<std::process::Output, String> {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .output()
+            .map_err(|e| format!("Failed to execute command: {}", e))
+    }
+
+    /// Execute a command with privilege elevation via osascript
+    fn run_privileged_command(&self, cmd: &str) -> Result<std::process::Output, String> {
+        // Use osascript to prompt for admin privileges (macOS native)
+        let escaped = cmd.replace('\\', "\\\\").replace('"', "\\\"");
+        let apple_script = format!(
+            "do shell script \"{}\" with administrator privileges",
+            escaped
+        );
+
+        std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&apple_script)
+            .output()
+            .map_err(|e| format!("Failed to execute privileged command: {}", e))
+    }
+
+    /// Resolve a hostname to IP addresses
+    fn resolve_hostname(&self, hostname: &str) -> Vec<String> {
+        use std::net::ToSocketAddrs;
+
+        if hostname.parse::<std::net::IpAddr>().is_ok() {
+            return vec![hostname.to_string()];
+        }
+
+        let addr_with_port = format!("{}:443", hostname);
+        match addr_with_port.to_socket_addrs() {
+            Ok(addrs) => {
+                let ips: Vec<String> = addrs.map(|addr| addr.ip().to_string()).collect();
+                if ips.is_empty() {
+                    vec![hostname.to_string()]
+                } else {
+                    ips
+                }
+            }
+            Err(_) => vec![hostname.to_string()],
+        }
+    }
+
+    /// Get path to the pf anchor conf file
+    fn get_pf_conf_path() -> std::path::PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("zen-vpn")
+            .join("pf-killswitch.conf")
+    }
+
+    /// Enable kill switch using pf
+    fn enable_pf(&self, config: &KillSwitchConfig) -> Result<KillSwitchResult, String> {
+        let server_host = &config.server_ip;
+        let tun_iface = &config.tun_interface;
+        let resolved_ips = self.resolve_hostname(server_host);
+
+        // Build pf rules for the anchor
+        let mut server_pass_rules = String::new();
+        for ip in &resolved_ips {
+            server_pass_rules.push_str(&format!("pass out quick on ! {} proto {{ tcp, udp }} from any to {} no state\n", tun_iface, ip));
+            server_pass_rules.push_str(&format!("pass in quick on ! {} proto {{ tcp, udp }} from {} to any no state\n", tun_iface, ip));
+        }
+
+        let pf_rules = format!(
+            r#"# Zen Privacy Kill Switch rules
+# Block all traffic except through VPN tunnel
+
+# Allow loopback
+pass quick on lo0 all
+
+# Allow traffic through VPN tunnel interface
+pass quick on {tun_iface} all
+
+# Allow traffic to VPN server
+{server_pass_rules}
+
+# Allow DHCP
+pass out quick proto udp from any to any port 67
+pass in quick proto udp from any port 67 to any
+
+# Allow DNS to public resolvers (fallback)
+pass out quick proto {{ tcp, udp }} from any to 1.1.1.1 port 53
+pass out quick proto {{ tcp, udp }} from any to 8.8.8.8 port 53
+
+# Block everything else
+block drop out all
+block drop in all
+"#,
+            tun_iface = tun_iface,
+            server_pass_rules = server_pass_rules
+        );
+
+        // Write pf rules to config file
+        let pf_conf_path = Self::get_pf_conf_path();
+        if let Some(parent) = pf_conf_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create config dir: {}", e))?;
+        }
+        std::fs::write(&pf_conf_path, &pf_rules)
+            .map_err(|e| format!("Failed to write pf config: {}", e))?;
+
+        // Load the anchor rules and enable pf
+        let cmd = format!(
+            "pfctl -a '{}' -f '{}' && pfctl -e 2>/dev/null; true",
+            Self::PF_ANCHOR,
+            pf_conf_path.to_string_lossy()
+        );
+
+        let output = self.run_privileged_command(&cmd)?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // pfctl -e returns 1 if already enabled, that's fine
+            if !stderr.contains("already enabled") && !stderr.is_empty() {
+                return Err(format!("Failed to enable pf kill switch: {}", stderr));
+            }
+        }
+
+        self.state.set_config(Some(config.clone()));
+        self.state.set_enabled(true);
+
+        if let Err(e) = self.save_state_file() {
+            eprintln!("Warning: Failed to save kill switch state: {}", e);
+        }
+
+        let ips_str = resolved_ips.join(", ");
+        Ok(KillSwitchResult::ok(format!(
+            "pf kill switch enabled (server: {} -> [{}], interface: {})",
+            server_host, ips_str, tun_iface
+        )))
+    }
+
+    /// Disable kill switch using pf
+    fn disable_pf(&self) -> Result<KillSwitchResult, String> {
+        // Flush the anchor rules
+        let cmd = format!(
+            "pfctl -a '{}' -F all 2>/dev/null; true",
+            Self::PF_ANCHOR
+        );
+
+        let _ = self.run_privileged_command(&cmd);
+
+        // Remove the pf conf file
+        let pf_conf_path = Self::get_pf_conf_path();
+        let _ = std::fs::remove_file(&pf_conf_path);
+
+        self.state.set_config(None);
+        self.state.set_enabled(false);
+
+        let _ = self.remove_state_file();
+
+        Ok(KillSwitchResult::ok("pf kill switch disabled"))
+    }
+
+    /// Save state file for crash recovery
+    fn save_state_file(&self) -> Result<(), String> {
+        let state_path = get_killswitch_state_path();
+
+        if let Some(parent) = state_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create state directory: {}", e))?;
+        }
+
+        let config = self.state.get_config();
+        let backend = self.state.backend();
+
+        let state_content = format!(
+            "backend={}\nserver_ip={}\ntun_interface={}\n",
+            backend,
+            config.as_ref().map(|c| c.server_ip.as_str()).unwrap_or(""),
+            config.as_ref().map(|c| c.tun_interface.as_str()).unwrap_or("zen-tun")
+        );
+
+        std::fs::write(&state_path, state_content)
+            .map_err(|e| format!("Failed to write state file: {}", e))
+    }
+
+    /// Remove the kill switch state file
+    fn remove_state_file(&self) -> Result<(), String> {
+        let state_path = get_killswitch_state_path();
+        if state_path.exists() {
+            std::fs::remove_file(&state_path)
+                .map_err(|e| format!("Failed to remove state file: {}", e))?;
+        }
+        Ok(())
+    }
+
+    /// Check if kill switch rules are currently active
+    pub fn check_rules_active(&self) -> bool {
+        let cmd = format!("pfctl -a '{}' -s rules 2>/dev/null", Self::PF_ANCHOR);
+        self.run_command(&cmd)
+            .map(|output| output.status.success() && !output.stdout.is_empty())
+            .unwrap_or(false)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Default for MacOSKillSwitch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl KillSwitch for MacOSKillSwitch {
+    fn enable(&self, config: &KillSwitchConfig) -> Result<KillSwitchResult, String> {
+        match self.state.backend() {
+            FirewallBackend::Pf => self.enable_pf(config),
+            _ => Err("No firewall backend available on macOS".to_string()),
+        }
+    }
+
+    fn disable(&self) -> Result<KillSwitchResult, String> {
+        match self.state.backend() {
+            FirewallBackend::Pf => self.disable_pf(),
+            _ => Err("No firewall backend available on macOS".to_string()),
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.state.is_enabled()
+    }
+
+    fn check_availability(&self) -> Result<String, String> {
+        match self.state.backend() {
+            FirewallBackend::Pf => Ok("pf".to_string()),
+            _ => Err("pf not available".to_string()),
+        }
+    }
+}
+
 /// No-op kill switch for unsupported platforms
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 pub struct NoOpKillSwitch;
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 impl NoOpKillSwitch {
     pub fn new() -> Self {
         Self
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 impl KillSwitch for NoOpKillSwitch {
     fn enable(&self, _config: &KillSwitchConfig) -> Result<KillSwitchResult, String> {
         Err("Kill switch not supported on this platform".to_string())
@@ -1233,6 +1516,7 @@ impl KillSwitchPersistentState {
                             "nftables" => FirewallBackend::Nftables,
                             "iptables" => FirewallBackend::Iptables,
                             "netsh" => FirewallBackend::Netsh,
+                            "pf" => FirewallBackend::Pf,
                             _ => FirewallBackend::None,
                         };
                     }
@@ -1339,7 +1623,13 @@ pub fn recover_killswitch() -> Result<Option<String>, String> {
         return recover_with_killswitch(&ks, state, &state_path);
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(target_os = "macos")]
+    {
+        let ks = MacOSKillSwitch::new();
+        return recover_with_killswitch(&ks, state, &state_path);
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
         // No recovery needed on unsupported platforms
         // Just clean up any stale state file
@@ -1352,7 +1642,7 @@ pub fn recover_killswitch() -> Result<Option<String>, String> {
 }
 
 /// Helper function to perform recovery with a specific kill switch implementation
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 fn recover_with_killswitch<K: KillSwitch + 'static>(
     ks: &K,
     state: Option<KillSwitchPersistentState>,
@@ -1417,6 +1707,25 @@ fn recover_with_killswitch<K: KillSwitch + 'static>(
         }
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(macos_ks) = (ks as &dyn std::any::Any).downcast_ref::<MacOSKillSwitch>() {
+            if macos_ks.check_rules_active() {
+                match ks.disable() {
+                    Ok(result) => {
+                        return Ok(Some(format!(
+                            "Cleaned up orphaned firewall rules - {}",
+                            result.message
+                        )));
+                    }
+                    Err(e) => {
+                        return Err(format!("Failed to clean up orphaned rules: {}", e));
+                    }
+                }
+            }
+        }
+    }
+
     Ok(None)
 }
 
@@ -1435,7 +1744,6 @@ pub fn cleanup_killswitch() -> Result<KillSwitchResult, String> {
     {
         let ks = LinuxKillSwitch::new();
         let result = ks.disable()?;
-        // Remove state file
         let _ = std::fs::remove_file(&state_path);
         return Ok(result);
     }
@@ -1444,12 +1752,19 @@ pub fn cleanup_killswitch() -> Result<KillSwitchResult, String> {
     {
         let ks = WindowsKillSwitch::new();
         let result = ks.disable()?;
-        // Remove state file
         let _ = std::fs::remove_file(&state_path);
         return Ok(result);
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(target_os = "macos")]
+    {
+        let ks = MacOSKillSwitch::new();
+        let result = ks.disable()?;
+        let _ = std::fs::remove_file(&state_path);
+        return Ok(result);
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
         let _ = std::fs::remove_file(&state_path);
         Ok(KillSwitchResult::ok("Cleanup complete (no-op on this platform)"))
@@ -1484,6 +1799,7 @@ mod tests {
         assert_eq!(FirewallBackend::Nftables.to_string(), "nftables");
         assert_eq!(FirewallBackend::Iptables.to_string(), "iptables");
         assert_eq!(FirewallBackend::Netsh.to_string(), "netsh");
+        assert_eq!(FirewallBackend::Pf.to_string(), "pf");
         assert_eq!(FirewallBackend::None.to_string(), "none");
     }
 
@@ -1518,6 +1834,7 @@ mod tests {
             FirewallBackend::Nftables
             | FirewallBackend::Iptables
             | FirewallBackend::Netsh
+            | FirewallBackend::Pf
             | FirewallBackend::None => {}
         }
     }

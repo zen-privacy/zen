@@ -23,6 +23,10 @@ tar = "0.4"
 zip = "0.6"
 dirs = "5"
 backon = { version = "1", features = ["tokio-sleep"] }
+semver = "1"
+sha2 = "0.10"
+
+[target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.54", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
@@ -31,8 +35,6 @@ windows = { version = "0.54", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
-semver = "1"
-sha2 = "0.10"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"

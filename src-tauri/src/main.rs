@@ -73,7 +73,22 @@ fn detect_dark_theme() -> bool {
         false
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(target_os = "macos")]
+    {
+        // Check macOS dark mode via defaults
+        if let Ok(output) = std::process::Command::new("defaults")
+            .args(["read", "-g", "AppleInterfaceStyle"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
+            if stdout.contains("dark") {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
         false
     }
@@ -905,7 +920,7 @@ async fn get_traffic_stats() -> Result<TrafficStats, String> {
     })
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
 #[tauri::command]
 async fn get_traffic_stats() -> Result<TrafficStats, String> {
     // On Linux, read from /sys/class/net/zen-tun/statistics/
@@ -925,6 +940,39 @@ async fn get_traffic_stats() -> Result<TrafficStats, String> {
         .unwrap_or(0);
 
     Ok(TrafficStats { rx_bytes, tx_bytes })
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+async fn get_traffic_stats() -> Result<TrafficStats, String> {
+    // On macOS, use netstat -ib to read interface stats for utun (sing-box TUN)
+    let output = std::process::Command::new("netstat")
+        .args(["-ib", "-n"])
+        .output()
+        .map_err(|e| format!("Failed to run netstat: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Find the zen-tun or utun interface line
+    // netstat -ib columns: Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+        // sing-box creates utun interfaces on macOS
+        let iface = parts[0];
+        if iface.starts_with("utun") && parts.len() >= 10 {
+            // Check if this is a Link-level entry (has Ibytes/Obytes)
+            if let (Ok(rx), Ok(tx)) = (parts[6].parse::<u64>(), parts[9].parse::<u64>()) {
+                if rx > 0 || tx > 0 {
+                    return Ok(TrafficStats { rx_bytes: rx, tx_bytes: tx });
+                }
+            }
+        }
+    }
+
+    Err("Interface not found".to_string())
 }
 
 /// Response structure for get_logs command

@@ -42,7 +42,7 @@
       "icons/icon.ico",
       "icons/icon.icns"
     ],
-    "targets": ["nsis", "deb", "rpm"],
+    "targets": ["nsis", "deb", "rpm", "dmg"],
     "windows": {
       "nsis": {
         "installMode": "currentUser"
@@ -54,6 +54,13 @@
       },
       "deb": {
         "depends": []
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "dmg": {
+        "appPosition": { "x": 180, "y": 170 },
+        "applicationFolderPosition": { "x": 480, "y": 170 }
       }
     }
   },

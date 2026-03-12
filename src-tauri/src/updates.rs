@@ -24,6 +24,8 @@ struct Assets {
     deb: Option<AssetEntry>,
     #[serde(default)]
     rpm: Option<AssetEntry>,
+    #[serde(default)]
+    macos: Option<AssetEntry>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -68,6 +70,11 @@ fn choose_platform_asset(manifest: &Manifest) -> (String, Option<AssetEntry>) {
             return ("linux-deb".to_string(), Some(deb.clone()));
         }
         ("linux".to_string(), None)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        ("macos".to_string(), manifest.assets.macos.clone())
     }
 }
 
@@ -204,6 +211,33 @@ pub async fn install_update(_app: AppHandle) -> Result<UpdateInfo, String> {
                         "ShellExecuteW failed. Code: {:?}, Path: {}",
                         result.0, path_str
                     ));
+                }
+            }
+        }
+    }
+
+    // macOS: mount DMG and open the app
+    #[cfg(target_os = "macos")]
+    {
+        if target_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.eq_ignore_ascii_case("dmg"))
+            .unwrap_or(false)
+        {
+            let path_str = target_path.to_string_lossy().to_string();
+            // Open the DMG — macOS will mount it and the user can drag to Applications
+            let result = std::process::Command::new("open")
+                .arg(&path_str)
+                .spawn();
+
+            match result {
+                Ok(_) => {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    return Err(format!("Failed to open DMG: {}", e));
                 }
             }
         }

@@ -193,9 +193,39 @@ fn detect_physical_interface() -> Option<String> {
     physical_iface
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 fn detect_physical_interface() -> Option<String> {
-    None // On Windows/macOS, auto_detect_interface works fine
+    // Parse `route get default` to find physical interface on macOS
+    let output = std::process::Command::new("route")
+        .args(["-n", "get", "default"])
+        .output()
+        .ok()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(iface) = line.strip_prefix("interface:") {
+            let iface = iface.trim();
+            // Skip tunnel/virtual interfaces
+            let is_tunnel = iface.starts_with("utun")
+                || iface.starts_with("tun")
+                || iface.starts_with("tap")
+                || iface.starts_with("bridge")
+                || iface.starts_with("vmnet");
+
+            if !is_tunnel {
+                return Some(iface.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn detect_physical_interface() -> Option<String> {
+    None // On Windows, auto_detect_interface works fine
 }
 
 /// Default health check interval for auto-reconnect (5 seconds)
@@ -454,6 +484,23 @@ async fn reconnect_singbox(
 
     #[cfg(not(target_os = "windows"))]
     {
+        // On macOS, use osascript for elevation; on Linux, use pkexec
+        #[cfg(target_os = "macos")]
+        let cmd = {
+            let inner_cmd = format!(
+                "{} run -c {} > {} 2>&1",
+                singbox_path.to_string_lossy(),
+                config_path.to_string_lossy(),
+                log_path.to_string_lossy()
+            );
+            let escaped = inner_cmd.replace('\\', "\\\\").replace('"', "\\\"");
+            format!(
+                "osascript -e 'do shell script \"{}\" with administrator privileges'",
+                escaped
+            )
+        };
+
+        #[cfg(not(target_os = "macos"))]
         let cmd = format!(
             "pkexec {} run -c {} > {} 2>&1",
             singbox_path.to_string_lossy(),
@@ -621,7 +668,10 @@ pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
     // Configure inbounds/inbound[0] based on platform
     let (inet4_address, strict_route, stack) = if cfg!(target_os = "windows") {
         ("172.19.0.1/30", false, "system")
+    } else if cfg!(target_os = "macos") {
+        ("100.64.0.1/30", true, "system")
     } else {
+        // Linux
         ("100.64.0.1/30", true, "gvisor")
     };
 
@@ -1093,7 +1143,7 @@ pub async fn start_singbox(
     Err("Connection timeout or UAC cancelled".to_string())
 }
 
-/// Start the sing-box process on Unix-like systems
+/// Start the sing-box process on Unix-like systems (Linux & macOS)
 #[cfg(not(target_os = "windows"))]
 #[tauri::command]
 pub async fn start_singbox(
@@ -1147,6 +1197,23 @@ pub async fn start_singbox(
     }
 
     let log_path = get_log_path();
+    // On macOS, use osascript for privilege elevation; on Linux, use pkexec
+    #[cfg(target_os = "macos")]
+    let cmd = {
+        let inner_cmd = format!(
+            "{} run -c {} > {} 2>&1",
+            singbox_path.to_string_lossy(),
+            config_path.to_string_lossy(),
+            log_path.to_string_lossy()
+        );
+        let escaped = inner_cmd.replace('\\', "\\\\").replace('"', "\\\"");
+        format!(
+            "osascript -e 'do shell script \"{}\" with administrator privileges'",
+            escaped
+        )
+    };
+
+    #[cfg(not(target_os = "macos"))]
     let cmd = format!(
         "pkexec {} run -c {} > {} 2>&1",
         singbox_path.to_string_lossy(),
@@ -1649,17 +1716,14 @@ async fn graceful_kill_external_process() -> Result<(), String> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        // First try SIGTERM via pkexec
-        let sigterm_result = std::process::Command::new("pkexec")
-            .args(["killall", "-TERM", "sing-box"])
-            .output();
+        // First try SIGTERM via platform-specific elevation
+        let sigterm_result = elevated_command("killall -TERM sing-box");
 
         if sigterm_result.is_ok() {
             // Wait for process to exit gracefully
             for _ in 0..(GRACEFUL_SHUTDOWN_TIMEOUT_SECS * 10) {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-                // Check if process is still running
                 let check = std::process::Command::new("pgrep")
                     .arg("-x")
                     .arg("sing-box")
@@ -1667,7 +1731,6 @@ async fn graceful_kill_external_process() -> Result<(), String> {
 
                 if let Ok(out) = check {
                     if !out.status.success() {
-                        // Process not found - it exited
                         return Ok(());
                     }
                 }
@@ -1675,11 +1738,37 @@ async fn graceful_kill_external_process() -> Result<(), String> {
         }
 
         // Force kill (SIGKILL) if still running
-        let _ = std::process::Command::new("pkexec")
-            .args(["killall", "-KILL", "sing-box"])
-            .output();
+        let _ = elevated_command("killall -KILL sing-box");
 
         Ok(())
+    }
+}
+
+/// Run a command with privilege elevation (pkexec on Linux, osascript on macOS)
+#[cfg(not(target_os = "windows"))]
+fn elevated_command(cmd: &str) -> Result<std::process::Output, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let escaped = cmd.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = format!(
+            "do shell script \"{}\" with administrator privileges",
+            escaped
+        );
+        std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .map_err(|e| format!("Failed to execute elevated command: {}", e))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::process::Command::new("pkexec")
+            .arg("sh")
+            .arg("-c")
+            .arg(cmd)
+            .output()
+            .map_err(|e| format!("Failed to execute elevated command: {}", e))
     }
 }
 
@@ -1750,9 +1839,20 @@ fn restore_dns() -> Result<(), String> {
         Ok(())
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    #[cfg(target_os = "macos")]
     {
-        // No-op on unsupported platforms
+        // Flush macOS DNS cache
+        let _ = std::process::Command::new("dscacheutil")
+            .arg("-flushcache")
+            .output();
+        let _ = std::process::Command::new("killall")
+            .args(["-HUP", "mDNSResponder"])
+            .output();
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
         Ok(())
     }
 }
@@ -1816,9 +1916,7 @@ pub fn graceful_shutdown_sync() {
     #[cfg(not(target_os = "windows"))]
     {
         // First try SIGTERM
-        let sigterm_result = std::process::Command::new("pkexec")
-            .args(["killall", "-TERM", "sing-box"])
-            .output();
+        let sigterm_result = elevated_command("killall -TERM sing-box");
 
         if sigterm_result.is_ok() {
             // Wait for process to exit gracefully (blocking)
@@ -1842,9 +1940,7 @@ pub fn graceful_shutdown_sync() {
         }
 
         // Force kill (SIGKILL) if still running
-        let _ = std::process::Command::new("pkexec")
-            .args(["killall", "-KILL", "sing-box"])
-            .output();
+        let _ = elevated_command("killall -KILL sing-box");
     }
 
     // Cleanup firewall and DNS
