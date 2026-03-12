@@ -88,8 +88,6 @@ function App() {
   const [installingUpdate, setInstallingUpdate] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [ruleSets, setRuleSets] = useState<RuleSetInfo[]>([])
-  const [importModalOpen, setImportModalOpen] = useState(false)
-  const [importContent, setImportContent] = useState('')
   const [subUrl, setSubUrl] = useState('')
   const [isFetchingSub, setIsFetchingSub] = useState(false)
 
@@ -195,43 +193,6 @@ function App() {
     }
   }
 
-  const handleImport = async () => {
-    if (!invoke || !importContent.trim()) return
-    setError(null)
-
-    try {
-      let config: VlessConfig
-      const content = importContent.trim()
-
-      if (content.startsWith('{')) {
-        // Assume JSON
-        config = await invoke<VlessConfig>('import_config_json', { jsonContent: content })
-      } else {
-        // Assume Link (hysteria2://, hy2://)
-        config = await invoke<VlessConfig>('parse_share_link', { link: content })
-      }
-
-      if (!config.address || !config.uuid || !config.port || config.port < 1 || config.port > 65535) {
-        setError('Invalid profile data')
-        return
-      }
-
-      const profile: Profile = {
-        id: crypto.randomUUID(),
-        name: config.name || 'Imported Profile',
-        config,
-      }
-
-      await invoke('save_profile', { profile })
-      setImportContent('')
-      setImportModalOpen(false)
-      await loadProfiles()
-      setSelectedId(profile.id)
-      toast.success('Profile imported successfully')
-    } catch (e) {
-      setError(String(e))
-    }
-  }
 
   const handleAddProfile = async () => {
     if (!invoke || !linkInput.trim()) return
@@ -507,10 +468,6 @@ function App() {
             </button>
           </div>
 
-          <button className="btn-import-json" onClick={() => setImportModalOpen(true)}>
-            Import Config (JSON)
-          </button>
-
           <div className="add-server sub-input">
             <input
               type="text"
@@ -617,55 +574,12 @@ function App() {
       <Settings
         isOpen={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        serverIp={currentProfile?.config.address}
         isConnected={isConnected}
         ruleSets={ruleSets}
         currentConfig={currentProfile?.config}
         onUpdateConfig={handleUpdateConfig}
       />
 
-      {/* Import Modal */}
-      {importModalOpen && (
-        <div className="modal-overlay">
-          <div className="modal-content">
-            <div className="modal-header">
-              <h3>Import Configuration</h3>
-              <button
-                className="btn-close"
-                onClick={() => setImportModalOpen(false)}
-              >
-                ✕
-              </button>
-            </div>
-            <div className="modal-body">
-              <p>Paste a Hysteria2 link or Sing-box JSON config:</p>
-              <textarea
-                value={importContent}
-                onChange={(e) => setImportContent(e.target.value)}
-                placeholder='hysteria2:// | hy2:// | {"outbounds": [...]}'
-                className="import-textarea"
-                rows={10}
-              />
-              {error && <div className="error-message-modal">{error}</div>}
-            </div>
-            <div className="modal-footer">
-              <button
-                className="btn-secondary"
-                onClick={() => setImportModalOpen(false)}
-              >
-                Cancel
-              </button>
-              <button
-                className="btn-primary"
-                onClick={handleImport}
-                disabled={!importContent.trim()}
-              >
-                Import
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

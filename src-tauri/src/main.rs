@@ -954,106 +954,118 @@ struct KillSwitchStatus {
     message: String,
 }
 
-/// Enable the kill switch to block traffic when VPN disconnects
-///
-/// This sets up firewall rules to:
-/// 1. Block all outbound traffic by default
-/// 2. Allow traffic to the VPN server IP
-/// 3. Allow traffic through the VPN tunnel interface
-/// 4. Allow loopback traffic
+/// Enable the kill switch
 #[tauri::command]
 fn enable_killswitch(server_ip: String) -> Result<KillSwitchStatus, String> {
-    let killswitch = create_killswitch();
-
-    // Check availability first
-    let backend = match killswitch.check_availability() {
-        Ok(b) => b,
-        Err(e) => {
-            return Ok(KillSwitchStatus {
-                enabled: false,
-                available: false,
-                backend: "none".to_string(),
-                message: format!("Kill switch not available: {}", e),
-            });
-        }
-    };
-
-    // Configure the kill switch
-    let config = KillSwitchConfig {
-        server_ip: server_ip.clone(),
-        tun_interface: "zen-tun".to_string(),
-        singbox_path: get_singbox_binary_path(),
-    };
-
-    // Enable the kill switch
-    match killswitch.enable(&config) {
-        Ok(result) => Ok(KillSwitchStatus {
-            enabled: result.success,
+    #[cfg(target_os = "windows")]
+    {
+        let _ = server_ip;
+        return Ok(KillSwitchStatus {
+            enabled: true,
             available: true,
-            backend,
-            message: result.message,
-        }),
-        Err(e) => Err(e),
+            backend: "strict_route".to_string(),
+            message: "Kill switch via strict_route (built-in sing-box protection)".to_string(),
+        });
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let killswitch = create_killswitch();
+        let backend = match killswitch.check_availability() {
+            Ok(b) => b,
+            Err(e) => {
+                return Ok(KillSwitchStatus {
+                    enabled: false,
+                    available: false,
+                    backend: "none".to_string(),
+                    message: format!("Kill switch not available: {}", e),
+                });
+            }
+        };
+
+        let config = KillSwitchConfig {
+            server_ip: server_ip.clone(),
+            tun_interface: "zen-tun".to_string(),
+            singbox_path: get_singbox_binary_path(),
+        };
+
+        match killswitch.enable(&config) {
+            Ok(result) => Ok(KillSwitchStatus {
+                enabled: result.success,
+                available: true,
+                backend,
+                message: result.message,
+            }),
+            Err(e) => Err(e),
+        }
     }
 }
 
-/// Disable the kill switch and restore normal network connectivity
-///
-/// This removes all firewall rules added by the kill switch.
+/// Disable the kill switch
 #[tauri::command]
 fn disable_killswitch() -> Result<KillSwitchStatus, String> {
-    let killswitch = create_killswitch();
-
-    // Check availability first
-    let backend = match killswitch.check_availability() {
-        Ok(b) => b,
-        Err(_) => "none".to_string(),
-    };
-
-    // Disable the kill switch
-    match killswitch.disable() {
-        Ok(result) => Ok(KillSwitchStatus {
+    #[cfg(target_os = "windows")]
+    {
+        return Ok(KillSwitchStatus {
             enabled: false,
-            available: backend != "none",
-            backend,
-            message: result.message,
-        }),
-        Err(e) => Err(e),
+            available: true,
+            backend: "strict_route".to_string(),
+            message: "Kill switch via strict_route (always active while VPN is connected)".to_string(),
+        });
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let killswitch = create_killswitch();
+        let backend = match killswitch.check_availability() {
+            Ok(b) => b,
+            Err(_) => "none".to_string(),
+        };
+
+        match killswitch.disable() {
+            Ok(result) => Ok(KillSwitchStatus {
+                enabled: false,
+                available: backend != "none",
+                backend,
+                message: result.message,
+            }),
+            Err(e) => Err(e),
+        }
     }
 }
 
 /// Get the current kill switch status
-///
-/// Returns information about whether the kill switch is enabled,
-/// available, and which backend is being used.
 #[tauri::command]
 fn get_killswitch_status() -> KillSwitchStatus {
-    let killswitch = create_killswitch();
+    #[cfg(target_os = "windows")]
+    {
+        return KillSwitchStatus {
+            enabled: true,
+            available: true,
+            backend: "strict_route".to_string(),
+            message: "Kill switch via strict_route (built-in sing-box protection)".to_string(),
+        };
+    }
 
-    // Check availability
-    let (available, backend) = match killswitch.check_availability() {
-        Ok(b) => (true, b),
-        Err(_) => (false, "none".to_string()),
-    };
+    #[cfg(not(target_os = "windows"))]
+    {
+        let killswitch = create_killswitch();
+        let (available, backend) = match killswitch.check_availability() {
+            Ok(b) => (true, b),
+            Err(_) => (false, "none".to_string()),
+        };
+        let enabled = vpn::state_file_exists();
 
-    // Check if kill switch is enabled by looking at the state file
-    // The in-memory state is reset on each call since create_killswitch() creates a new instance
-    // The state file persists the actual enabled state
-    let enabled = vpn::state_file_exists();
-
-    let message = if !available {
-        "Kill switch not available on this platform".to_string()
-    } else if enabled {
-        format!("Kill switch active ({})", backend)
-    } else {
-        format!("Kill switch ready ({})", backend)
-    };
-
-    KillSwitchStatus {
-        enabled,
-        available,
-        backend,
-        message,
+        KillSwitchStatus {
+            enabled,
+            available,
+            backend,
+            message: if enabled {
+                format!("Kill switch active ({})", backend)
+            } else {
+                format!("Kill switch ready ({})", backend)
+            },
+        }
     }
 }
 

@@ -360,9 +360,13 @@ async fn attempt_reconnection(
             Ok(()) => {
                 state.log(LogLevel::Info, format!("Reconnection successful on attempt {}", attempt));
 
-                // Re-enable kill switch after successful reconnection
-                auto_enable_killswitch(&config.address, &app_handle);
-                state.log(LogLevel::Info, "Kill switch re-enabled after reconnection".to_string());
+                // On Linux/macOS, re-enable real firewall kill switch
+                // On Windows, strict_route handles it
+                #[cfg(not(target_os = "windows"))]
+                {
+                    auto_enable_killswitch(&config.address, &app_handle);
+                    state.log(LogLevel::Info, "Kill switch re-enabled after reconnection".to_string());
+                }
 
                 vpn_manager.set_state(ConnectionState::Connected);
                 emit_vpn_event(
@@ -436,49 +440,38 @@ async fn reconnect_singbox(
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-        // Create batch script for elevation
-        let script_path = config_dir.join("run_singbox.bat");
-        let script_content = format!(
-            "@echo off\r\n\"{}\" run -c \"{}\" > \"{}\" 2>&1",
-            singbox_path.to_string_lossy(),
-            config_path.to_string_lossy(),
-            log_path.to_string_lossy()
-        );
-        fs::write(&script_path, script_content).map_err(|e| e.to_string())?;
+        let log_file = fs::File::create(&log_path).map_err(|e| e.to_string())?;
 
-        // Use PowerShell to elevate
-        let mut child = Command::new("powershell")
+        let child = Command::new(&singbox_path)
             .creation_flags(CREATE_NO_WINDOW)
-            .args([
-                "-Command",
-                &format!(
-                    "Start-Process -FilePath '{}' -Verb RunAs -WindowStyle Hidden",
-                    script_path.to_string_lossy()
-                ),
-            ])
+            .args(["run", "-c", &config_path.to_string_lossy()])
+            .stdout(log_file.try_clone().map_err(|e| e.to_string())?)
+            .stderr(log_file)
             .spawn()
             .map_err(|e| format!("Failed to start sing-box: {}", e))?;
 
-        // Wait for process to start
+        {
+            let mut process = state.singbox_process.lock().unwrap();
+            *process = Some(child);
+        }
+
         for _ in 0..100 {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            let output = std::process::Command::new("tasklist")
-                .creation_flags(CREATE_NO_WINDOW)
-                .args(["/FI", "IMAGENAME eq sing-box.exe"])
-                .output();
-
-            if let Ok(out) = output {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                if stdout.contains("sing-box.exe") {
-                    let mut process = state.singbox_process.lock().unwrap();
-                    *process = Some(child);
+            if let Ok(log_content) = fs::read_to_string(&log_path) {
+                if log_content.contains("sing-box started") {
                     return Ok(());
                 }
             }
         }
 
-        let _ = child.kill().await;
+        let child_to_kill = {
+            let mut process = state.singbox_process.lock().unwrap();
+            process.take()
+        };
+        if let Some(mut child) = child_to_kill {
+            let _ = child.kill().await;
+        }
         Err("Reconnection timeout".to_string())
     }
 
@@ -632,7 +625,7 @@ pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
 
     // Configure inbounds/inbound[0] based on platform
     let (inet4_address, strict_route, stack) = if cfg!(target_os = "windows") {
-        ("172.19.0.1/30", false, "system")
+        ("172.19.0.1/30", true, "gvisor")
     } else if cfg!(target_os = "macos") {
         ("100.64.0.1/30", true, "system")
     } else {
@@ -687,7 +680,10 @@ pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
             }
         ],
         "auto_detect_interface": true,
-        "final": "proxy"
+        "final": "proxy",
+        "default_domain_resolver": {
+            "server": "local"
+        }
     });
 
     // If a physical interface was detected, set it as default to bypass other VPNs
@@ -772,14 +768,14 @@ pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
             "servers": [
                 {
                     "tag": "remote",
-                    "address": "tls://1.1.1.1",
-                    "address_resolver": "local",
+                    "type": "tls",
+                    "server": "1.1.1.1",
                     "detour": "proxy"
                 },
                 {
                     "tag": "local",
-                    "address": "223.5.5.5",
-                    "detour": "direct"
+                    "type": "udp",
+                    "server": "223.5.5.5"
                 }
             ],
             "rules": [],
@@ -967,32 +963,22 @@ pub async fn start_singbox(
         return Err("sing-box not installed. Please download it first.".to_string());
     }
 
-    // On Windows, run sing-box with elevated privileges using runas
     let log_path = get_log_path();
-
-    // Create a batch script to run with elevation
-    let script_path = config_dir.join("run_singbox.bat");
-    let script_content = format!(
-        "@echo off\r\n\"{}\" run -c \"{}\" > \"{}\" 2>&1",
-        singbox_path.to_string_lossy(),
-        config_path.to_string_lossy(),
-        log_path.to_string_lossy()
-    );
-    fs::write(&script_path, script_content).map_err(|e| e.to_string())?;
 
     // Spawn log reader before starting the process
     spawn_log_reader(state.log_buffer.clone());
 
-    // Use PowerShell to elevate (hidden window)
-    let mut child = Command::new("powershell")
+    // App runs as admin (requireAdministrator manifest), so launch sing-box directly
+    let log_file = fs::File::create(&log_path).map_err(|e| {
+        state.log(LogLevel::Error, format!("Failed to create log file: {}", e));
+        e.to_string()
+    })?;
+
+    let child = Command::new(&singbox_path)
         .creation_flags(CREATE_NO_WINDOW)
-        .args([
-            "-Command",
-            &format!(
-                "Start-Process -FilePath '{}' -Verb RunAs -WindowStyle Hidden",
-                script_path.to_string_lossy()
-            ),
-        ])
+        .args(["run", "-c", &config_path.to_string_lossy()])
+        .stdout(log_file.try_clone().map_err(|e| e.to_string())?)
+        .stderr(log_file)
         .spawn()
         .map_err(|e| {
             state.log(LogLevel::Error, format!("Failed to start sing-box: {}", e));
@@ -1000,35 +986,27 @@ pub async fn start_singbox(
             format!("Failed to start sing-box: {}", e)
         })?;
 
-    // Wait for process to start
-    for _ in 0..100 {
+    {
+        let mut process = state.singbox_process.lock().unwrap();
+        *process = Some(child);
+    }
+
+    // Wait for sing-box to start by checking log output
+    for _ in 0..150 {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-        // Check if sing-box is running (hidden window)
-        let output = std::process::Command::new("tasklist")
-            .creation_flags(CREATE_NO_WINDOW)
-            .args(["/FI", "IMAGENAME eq sing-box.exe"])
-            .output();
-
-        if let Ok(out) = output {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            if stdout.contains("sing-box.exe") {
-                let mut process = state.singbox_process.lock().unwrap();
-                *process = Some(child);
+        if let Ok(log_content) = fs::read_to_string(&log_path) {
+            if log_content.contains("sing-box started") {
                 state.log(LogLevel::Info, format!("VPN connected to {}", config.address));
                 emit_vpn_event(&app_handle, VpnEvent::connected(config.name.clone(), config.address.clone()));
 
-                // Auto-enable kill switch to prevent IP leaks on disconnect
-                auto_enable_killswitch(&config.address, &app_handle);
-                state.log(LogLevel::Info, "Kill switch auto-enabled".to_string());
+                // Kill switch is handled by strict_route in sing-box config
 
                 // Update VpnManager state and start health monitor for auto-reconnect
                 vpn_manager.set_state(ConnectionState::Connected);
 
-                // Create Arc wrapper for AppState to share with health monitor
-                // Note: We use a new Arc since State<'_, T> doesn't impl Clone for Arc<T>
                 let state_arc = Arc::new(AppState {
-                    singbox_process: Mutex::new(None), // Monitor doesn't need process handle
+                    singbox_process: Mutex::new(None),
                     log_buffer: state.log_buffer.clone(),
                     health_monitor: Mutex::new(None),
                     current_config: Mutex::new(state.get_config()),
@@ -1043,14 +1021,36 @@ pub async fn start_singbox(
 
                 return Ok(());
             }
+            if log_content.contains("fatal") || log_content.contains("error") {
+                let error_msg = log_content.lines().last().unwrap_or("Unknown error").to_string();
+                state.log(LogLevel::Error, format!("sing-box failed: {}", error_msg));
+                emit_vpn_event(&app_handle, VpnEvent::error(format!("sing-box error: {}", error_msg), Some("SINGBOX_ERROR".to_string())));
+
+                let child_to_kill = {
+                    let mut process = state.singbox_process.lock().unwrap();
+                    process.take()
+                };
+                if let Some(mut c) = child_to_kill {
+                    let _ = c.kill().await;
+                }
+                vpn_manager.set_state(ConnectionState::Failed);
+                return Err(format!("sing-box failed: {}", error_msg));
+            }
         }
     }
 
-    let _ = child.kill().await;
-    state.log(LogLevel::Error, "Connection timeout or UAC cancelled".to_string());
-    emit_vpn_event(&app_handle, VpnEvent::error("Connection timeout or UAC cancelled", Some("TIMEOUT".to_string())));
+    // Timeout
+    let child_to_kill = {
+        let mut process = state.singbox_process.lock().unwrap();
+        process.take()
+    };
+    if let Some(mut c) = child_to_kill {
+        let _ = c.kill().await;
+    }
+    state.log(LogLevel::Error, "Connection timeout".to_string());
+    emit_vpn_event(&app_handle, VpnEvent::error("Connection timeout", Some("TIMEOUT".to_string())));
     vpn_manager.set_state(ConnectionState::Failed);
-    Err("Connection timeout or UAC cancelled".to_string())
+    Err("Connection timeout".to_string())
 }
 
 /// Start the sing-box process on Unix-like systems (Linux & macOS)
@@ -1173,7 +1173,7 @@ pub async fn start_singbox(
                         state.log(LogLevel::Info, format!("VPN connected to {}", config.address));
                         emit_vpn_event(&app_handle, VpnEvent::connected(config.name.clone(), config.address.clone()));
 
-                        // Auto-enable kill switch to prevent IP leaks on disconnect
+                        // Auto-enable kill switch (Linux/macOS use real firewall rules)
                         auto_enable_killswitch(&config.address, &app_handle);
                         state.log(LogLevel::Info, "Kill switch auto-enabled".to_string());
 
@@ -2080,11 +2080,12 @@ mod tests {
         let dns_servers = v["dns"]["servers"].as_array().unwrap();
         assert_eq!(dns_servers.len(), 2);
         assert_eq!(dns_servers[0]["tag"], "remote");
-        assert_eq!(dns_servers[0]["address"], "tls://1.1.1.1");
+        assert_eq!(dns_servers[0]["type"], "tls");
+        assert_eq!(dns_servers[0]["server"], "1.1.1.1");
         assert_eq!(dns_servers[0]["detour"], "proxy");
         assert_eq!(dns_servers[1]["tag"], "local");
-        assert_eq!(dns_servers[1]["address"], "223.5.5.5");
-        assert_eq!(dns_servers[1]["detour"], "direct");
+        assert_eq!(dns_servers[1]["type"], "udp");
+        assert_eq!(dns_servers[1]["server"], "223.5.5.5");
         assert_eq!(v["dns"]["final"], "remote");
         assert_eq!(v["dns"]["strategy"], "ipv4_only");
     }

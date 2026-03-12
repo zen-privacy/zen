@@ -956,11 +956,11 @@ impl WindowsKillSwitch {
         // TUN address (172.19.0.0/30), sing-box picks it up and forwards through VPN.
         self.add_rule(
             "ZenVPN-Allow-TUN-Out",
-            &["dir=out", "action=allow", "remoteip=172.19.0.0/30", "enable=yes"],
+            &["dir=out", "action=allow", "localip=172.19.0.0/30", "enable=yes"],
         )?;
         self.add_rule(
             "ZenVPN-Allow-TUN-In",
-            &["dir=in", "action=allow", "remoteip=172.19.0.0/30", "enable=yes"],
+            &["dir=in", "action=allow", "localip=172.19.0.0/30", "enable=yes"],
         )?;
 
         // 8. Block all other outbound traffic
