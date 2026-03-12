@@ -212,11 +212,6 @@ body {
   font-weight: bold;
 }
 
-.protocol-badge.vless {
-  background: rgba(255,255,255,0.15);
-  color: rgba(255,255,255,0.7);
-}
-
 .protocol-badge.hy2 {
   background: rgba(0,180,255,0.25);
   color: rgba(100,200,255,0.9);

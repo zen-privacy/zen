@@ -622,44 +622,9 @@ fn copy_resource_file(app_handle: &AppHandle, filename: &str) -> Result<(), Stri
     Ok(())
 }
 
-/// Generate sing-box configuration JSON from VlessConfig
+/// Generate sing-box configuration JSON from VlessConfig (Hysteria2 only)
 #[tauri::command]
 pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
-    let transport = if config.transport_type == "ws" {
-        serde_json::json!({
-            "type": "ws",
-            "path": config.path,
-            "headers": {
-                "Host": config.host
-            },
-            "max_early_data": 2048,
-            "early_data_header_name": "Sec-WebSocket-Protocol"
-        })
-    } else {
-        serde_json::json!(null)
-    };
-
-    // Detect Reality configuration from path params (e.g. "pbk=...&sid=...")
-    // This allows using Reality without changing the UI
-    let mut is_reality = false;
-    let mut reality_pbk = String::new();
-    let mut reality_sid = String::new();
-    let mut reality_fp = "chrome".to_string();
-
-    if config.transport_type == "tcp" && config.path.contains("pbk=") {
-        is_reality = true;
-        for pair in config.path.split('&') {
-            if let Some((k, v)) = pair.split_once('=') {
-                match k {
-                    "pbk" => reality_pbk = v.to_string(),
-                    "sid" => reality_sid = v.to_string(),
-                    "fp" => reality_fp = v.to_string(),
-                    _ => {}
-                }
-            }
-        }
-    }
-
     // Always resolve server hostname to IP before starting sing-box.
     // This prevents DNS loop: sing-box routes all traffic through TUN,
     // so DNS queries for the VPN server hostname would also go through TUN.
@@ -770,88 +735,33 @@ pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
         }
     }
 
-    // Configure security/tls
-    let flow = if is_reality { "xtls-rprx-vision" } else { "" };
-    
-    let tls_config = if is_reality {
-        // Reality configuration
-        serde_json::json!({
+    // Build Hysteria2 proxy outbound
+    let mut proxy_outbound = serde_json::json!({
+        "type": "hysteria2",
+        "tag": "proxy",
+        "server": server_ip.clone(),
+        "server_port": config.port,
+        "password": config.uuid,
+        "tls": {
             "enabled": true,
-            "server_name": config.host.clone(),
-            "insecure": false,
-            "utls": {
-                "enabled": true,
-                "fingerprint": reality_fp
-            },
-            "reality": {
-                "enabled": true,
-                "public_key": reality_pbk,
-                "short_id": reality_sid
-            }
-        })
-    } else if config.security == "tls" {
-        // Regular TLS configuration (no reality block)
-        serde_json::json!({
-            "enabled": true,
-            "server_name": config.host.clone(),
+            "server_name": if config.host.is_empty() { config.address.clone() } else { config.host.clone() },
             "insecure": false
-        })
-    } else {
-        serde_json::json!(null)
-    };
-
-    // Build proxy outbound based on protocol
-    let protocol = config.protocol.as_deref().unwrap_or("vless");
-
-    let proxy_outbound = if protocol == "hysteria2" {
-        let mut ob = serde_json::json!({
-            "type": "hysteria2",
-            "tag": "proxy",
-            "server": server_ip.clone(),
-            "server_port": config.port,
-            "password": config.uuid,
-            "tls": {
-                "enabled": true,
-                "server_name": if config.host.is_empty() { config.address.clone() } else { config.host.clone() },
-                "insecure": false
-            }
-        });
-        if let Some(up) = config.up_mbps {
-            ob["up_mbps"] = serde_json::json!(up);
         }
-        if let Some(down) = config.down_mbps {
-            ob["down_mbps"] = serde_json::json!(down);
+    });
+    if let Some(up) = config.up_mbps {
+        proxy_outbound["up_mbps"] = serde_json::json!(up);
+    }
+    if let Some(down) = config.down_mbps {
+        proxy_outbound["down_mbps"] = serde_json::json!(down);
+    }
+    if let Some(ref obfs_type) = config.obfs {
+        if !obfs_type.is_empty() {
+            proxy_outbound["obfs"] = serde_json::json!({
+                "type": obfs_type,
+                "password": config.obfs_password.as_deref().unwrap_or("")
+            });
         }
-        if let Some(ref obfs_type) = config.obfs {
-            if !obfs_type.is_empty() {
-                ob["obfs"] = serde_json::json!({
-                    "type": obfs_type,
-                    "password": config.obfs_password.as_deref().unwrap_or("")
-                });
-            }
-        }
-        ob
-    } else {
-        // VLESS outbound (existing logic)
-        let mut ob = serde_json::json!({
-            "type": "vless",
-            "tag": "proxy",
-            "server": server_ip.clone(),
-            "server_port": config.port,
-            "uuid": config.uuid,
-            "tls": tls_config
-        });
-
-        if !flow.is_empty() {
-            ob["flow"] = serde_json::json!(flow);
-        }
-
-        // Only add transport if it's WebSocket (not null)
-        if config.transport_type == "ws" {
-            ob["transport"] = transport;
-        }
-        ob
-    };
+    }
 
     let singbox_config = serde_json::json!({
         "log": {
@@ -2075,31 +1985,6 @@ mod tests {
 
     // ==================== generate_singbox_config tests ====================
 
-    fn make_vless_config(
-        transport: &str,
-        security: &str,
-        path: &str,
-        host: &str,
-    ) -> VlessConfig {
-        VlessConfig {
-            uuid: "test-uuid".to_string(),
-            address: "1.2.3.4".to_string(),
-            port: 443,
-            security: security.to_string(),
-            transport_type: transport.to_string(),
-            path: path.to_string(),
-            host: host.to_string(),
-            name: "Test".to_string(),
-            routing_mode: None,
-            target_country: None,
-            protocol: Some("vless".to_string()),
-            up_mbps: None,
-            down_mbps: None,
-            obfs: None,
-            obfs_password: None,
-        }
-    }
-
     fn make_hy2_config() -> VlessConfig {
         VlessConfig {
             uuid: "mypassword".to_string(),
@@ -2118,63 +2003,6 @@ mod tests {
             obfs: None,
             obfs_password: None,
         }
-    }
-
-    #[test]
-    fn test_gen_vless_ws_config() {
-        let config = make_vless_config("ws", "tls", "/ws-path", "cdn.example.com");
-        let json_str = generate_singbox_config(config).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-
-        let outbounds = v["outbounds"].as_array().unwrap();
-        let proxy = &outbounds[0];
-        assert_eq!(proxy["type"], "vless");
-        assert_eq!(proxy["uuid"], "test-uuid");
-        assert_eq!(proxy["server"], "1.2.3.4");
-        assert_eq!(proxy["server_port"], 443);
-
-        // Transport
-        assert_eq!(proxy["transport"]["type"], "ws");
-        assert_eq!(proxy["transport"]["path"], "/ws-path");
-        assert_eq!(proxy["transport"]["headers"]["Host"], "cdn.example.com");
-
-        // TLS
-        assert_eq!(proxy["tls"]["enabled"], true);
-        assert_eq!(proxy["tls"]["server_name"], "cdn.example.com");
-    }
-
-    #[test]
-    fn test_gen_vless_reality_config() {
-        let config = make_vless_config(
-            "tcp",
-            "reality",
-            "pbk=PUBKEY&sid=SHORTID&fp=firefox",
-            "www.google.com",
-        );
-        let json_str = generate_singbox_config(config).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-
-        let proxy = &v["outbounds"][0];
-        assert_eq!(proxy["type"], "vless");
-        assert_eq!(proxy["flow"], "xtls-rprx-vision");
-        assert_eq!(proxy["tls"]["reality"]["enabled"], true);
-        assert_eq!(proxy["tls"]["reality"]["public_key"], "PUBKEY");
-        assert_eq!(proxy["tls"]["reality"]["short_id"], "SHORTID");
-        assert_eq!(proxy["tls"]["utls"]["fingerprint"], "firefox");
-        // Should NOT have transport for tcp
-        assert!(proxy.get("transport").is_none());
-    }
-
-    #[test]
-    fn test_gen_vless_tcp_tls() {
-        let config = make_vless_config("tcp", "tls", "", "example.com");
-        let json_str = generate_singbox_config(config).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-
-        let proxy = &v["outbounds"][0];
-        assert_eq!(proxy["tls"]["enabled"], true);
-        assert!(proxy.get("transport").is_none());
-        assert!(proxy.get("flow").is_none() || proxy["flow"] == "");
     }
 
     #[test]
@@ -2234,7 +2062,7 @@ mod tests {
 
     #[test]
     fn test_gen_global_routing() {
-        let config = make_vless_config("tcp", "none", "", "");
+        let config = make_hy2_config();
         let json_str = generate_singbox_config(config).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -2245,7 +2073,7 @@ mod tests {
 
     #[test]
     fn test_gen_dns_config() {
-        let config = make_vless_config("tcp", "none", "", "");
+        let config = make_hy2_config();
         let json_str = generate_singbox_config(config).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -2263,7 +2091,7 @@ mod tests {
 
     #[test]
     fn test_gen_tun_inbound() {
-        let config = make_vless_config("tcp", "none", "", "");
+        let config = make_hy2_config();
         let json_str = generate_singbox_config(config).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -2276,7 +2104,7 @@ mod tests {
 
     #[test]
     fn test_gen_server_ip_in_route_rules() {
-        let config = make_vless_config("tcp", "none", "", "");
+        let config = make_hy2_config();
         let json_str = generate_singbox_config(config).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -2285,7 +2113,7 @@ mod tests {
         let ip_rule = rules.iter().find(|r| r.get("ip_cidr").is_some());
         assert!(ip_rule.is_some(), "Should have ip_cidr rule for server IP");
         let ip_cidr = ip_rule.unwrap()["ip_cidr"][0].as_str().unwrap();
-        assert_eq!(ip_cidr, "1.2.3.4/32");
+        assert_eq!(ip_cidr, "5.6.7.8/32");
         assert_eq!(ip_rule.unwrap()["outbound"], "direct");
     }
 
@@ -2295,7 +2123,7 @@ mod tests {
         // If it resolves to an IP, we get ip_cidr rule.
         // If it doesn't resolve (unlikely for real domains but common for test domains),
         // we get a domain rule.
-        let mut config = make_vless_config("tcp", "none", "", "");
+        let mut config = make_hy2_config();
         config.address = "thishostdoesnotexist.invalid.tld".to_string();
         let json_str = generate_singbox_config(config).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -2310,7 +2138,7 @@ mod tests {
 
     #[test]
     fn test_gen_ip_is_private_rule() {
-        let config = make_vless_config("tcp", "none", "", "");
+        let config = make_hy2_config();
         let json_str = generate_singbox_config(config).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -2323,7 +2151,7 @@ mod tests {
 
     #[test]
     fn test_gen_outbounds_structure() {
-        let config = make_vless_config("tcp", "none", "", "");
+        let config = make_hy2_config();
         let json_str = generate_singbox_config(config).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -2336,7 +2164,7 @@ mod tests {
 
     #[test]
     fn test_gen_dns_hijack_rule() {
-        let config = make_vless_config("tcp", "none", "", "");
+        let config = make_hy2_config();
         let json_str = generate_singbox_config(config).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
@@ -2348,37 +2176,15 @@ mod tests {
     }
 
     #[test]
-    fn test_gen_serde_validity_all_protocols() {
-        // All generated configs should be valid JSON
-        let configs = vec![
-            make_vless_config("ws", "tls", "/ws", "host.com"),
-            make_vless_config("tcp", "reality", "pbk=pk&sid=sid&fp=chrome", "google.com"),
-            make_vless_config("tcp", "tls", "", "host.com"),
-            make_vless_config("tcp", "none", "", ""),
-            make_hy2_config(),
-        ];
-
-        for config in configs {
-            let json_str = generate_singbox_config(config).unwrap();
-            let parsed: Result<serde_json::Value, _> = serde_json::from_str(&json_str);
-            assert!(parsed.is_ok(), "Generated config should be valid JSON");
-        }
+    fn test_gen_serde_validity() {
+        // Generated config should be valid JSON
+        let config = make_hy2_config();
+        let json_str = generate_singbox_config(config).unwrap();
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&json_str);
+        assert!(parsed.is_ok(), "Generated config should be valid JSON");
     }
 
-    // ==================== VlessConfig serde roundtrip tests ====================
-
-    #[test]
-    fn test_vless_config_serde_roundtrip() {
-        let config = make_vless_config("ws", "tls", "/ws", "host.com");
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: VlessConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(config.uuid, deserialized.uuid);
-        assert_eq!(config.address, deserialized.address);
-        assert_eq!(config.port, deserialized.port);
-        assert_eq!(config.security, deserialized.security);
-        assert_eq!(config.transport_type, deserialized.transport_type);
-        assert_eq!(config.protocol, deserialized.protocol);
-    }
+    // ==================== Config serde roundtrip tests ====================
 
     #[test]
     fn test_hy2_config_serde_roundtrip() {
@@ -2397,8 +2203,8 @@ mod tests {
     }
 
     #[test]
-    fn test_vless_config_optional_defaults() {
-        let config = make_vless_config("tcp", "none", "", "");
+    fn test_config_optional_defaults() {
+        let config = make_hy2_config();
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: VlessConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.routing_mode, None);
@@ -2406,14 +2212,14 @@ mod tests {
     }
 
     #[test]
-    fn test_vless_config_backwards_compat() {
-        // Old JSON without new hysteria2 fields should deserialize OK
+    fn test_config_backwards_compat() {
+        // Old JSON without hysteria2-specific fields should deserialize OK
         let json = r#"{
             "uuid": "test",
             "address": "host",
             "port": 443,
-            "security": "none",
-            "transport_type": "tcp",
+            "security": "tls",
+            "transport_type": "",
             "path": "",
             "host": "",
             "name": "Old"
@@ -2428,19 +2234,19 @@ mod tests {
     }
 
     #[test]
-    fn test_vless_config_all_fields() {
+    fn test_config_all_fields() {
         let config = VlessConfig {
-            uuid: "uuid".to_string(),
+            uuid: "password".to_string(),
             address: "addr".to_string(),
             port: 443,
             security: "tls".to_string(),
-            transport_type: "ws".to_string(),
-            path: "/path".to_string(),
+            transport_type: "".to_string(),
+            path: "".to_string(),
             host: "host".to_string(),
             name: "name".to_string(),
             routing_mode: Some("smart".to_string()),
             target_country: Some("ru".to_string()),
-            protocol: Some("vless".to_string()),
+            protocol: Some("hysteria2".to_string()),
             up_mbps: Some(50),
             down_mbps: Some(100),
             obfs: Some("salamander".to_string()),

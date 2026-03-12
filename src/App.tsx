@@ -207,7 +207,7 @@ function App() {
         // Assume JSON
         config = await invoke<VlessConfig>('import_config_json', { jsonContent: content })
       } else {
-        // Assume Link (vless://, hysteria2://, hy2://)
+        // Assume Link (hysteria2://, hy2://)
         config = await invoke<VlessConfig>('parse_share_link', { link: content })
       }
 
@@ -476,8 +476,8 @@ function App() {
                 >
                   <div className="server-name">
                     {profile.name}
-                    <span className={`protocol-badge ${profile.config.protocol === 'hysteria2' ? 'hy2' : 'vless'}`}>
-                      {profile.config.protocol === 'hysteria2' ? 'HY2' : 'VLESS'}
+                    <span className="protocol-badge hy2">
+                      HY2
                     </span>
                   </div>
                   <div className="server-address">
@@ -497,7 +497,7 @@ function App() {
           <div className="add-server">
             <input
               type="text"
-              placeholder="vless:// or hysteria2:// link"
+              placeholder="hysteria2:// or hy2:// link"
               value={linkInput}
               onChange={(e) => setLinkInput(e.target.value)}
               onKeyPress={handleKeyPress}
@@ -638,11 +638,11 @@ function App() {
               </button>
             </div>
             <div className="modal-body">
-              <p>Paste a VLESS link or Sing-box JSON config:</p>
+              <p>Paste a Hysteria2 link or Sing-box JSON config:</p>
               <textarea
                 value={importContent}
                 onChange={(e) => setImportContent(e.target.value)}
-                placeholder='vless:// | hysteria2:// | {"outbounds": [...]}'
+                placeholder='hysteria2:// | hy2:// | {"outbounds": [...]}'
                 className="import-textarea"
                 rows={10}
               />

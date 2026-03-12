@@ -335,97 +335,6 @@ fn extract_from_targz(_bytes: &[u8], _singbox_path: &PathBuf) -> Result<(), Stri
 }
 
 #[tauri::command]
-fn parse_vless_link(link: String) -> Result<VlessConfig, String> {
-    if !link.starts_with("vless://") {
-        return Err("Invalid VLESS link".to_string());
-    }
-
-    let without_prefix = link.strip_prefix("vless://").unwrap();
-
-    let (main_part, name) = if let Some(idx) = without_prefix.find('#') {
-        let (main, name) = without_prefix.split_at(idx);
-        (
-            main,
-            urlencoding::decode(&name[1..])
-                .unwrap_or_default()
-                .to_string(),
-        )
-    } else {
-        (without_prefix, "Unnamed".to_string())
-    };
-
-    let (uuid, rest) = main_part
-        .split_once('@')
-        .ok_or("Invalid format: missing @")?;
-
-    let (addr_port, params_str) = rest.split_once('?').ok_or("Invalid format: missing ?")?;
-
-    let (address, port_str) = addr_port
-        .rsplit_once(':')
-        .ok_or("Invalid format: missing port")?;
-
-    let port: u16 = port_str.parse().map_err(|_| "Invalid port number")?;
-
-    let params: std::collections::HashMap<String, String> = params_str
-        .split('&')
-        .filter_map(|p| {
-            let mut parts = p.splitn(2, '=');
-            Some((
-                parts.next()?.to_string(),
-                urlencoding::decode(parts.next().unwrap_or(""))
-                    .unwrap_or_default()
-                    .to_string(),
-            ))
-        })
-        .collect();
-
-    // Determine security type
-    let security = params
-        .get("security")
-        .cloned()
-        .unwrap_or_else(|| "none".to_string());
-
-    // For Reality, construct path with pbk, sid, fp parameters
-    // This is parsed by generate_singbox_config
-    let path = if security == "reality" {
-        let pbk = params.get("pbk").cloned().unwrap_or_default();
-        let sid = params.get("sid").cloned().unwrap_or_default();
-        let fp = params.get("fp").cloned().unwrap_or_else(|| "chrome".to_string());
-        format!("pbk={}&sid={}&fp={}", pbk, sid, fp)
-    } else {
-        params.get("path").cloned().unwrap_or_default()
-    };
-
-    // For Reality, use sni parameter; otherwise use host
-    let host = params
-        .get("sni")
-        .cloned()
-        .or_else(|| params.get("host").cloned())
-        .unwrap_or_else(|| address.to_string());
-
-    Ok(VlessConfig {
-        uuid: uuid.to_string(),
-        address: address.to_string(),
-        port,
-        security,
-        transport_type: params
-            .get("type")
-            .cloned()
-            .unwrap_or_else(|| "tcp".to_string()),
-        path,
-        host,
-        name,
-        routing_mode: None,
-        target_country: None,
-        protocol: Some("vless".to_string()),
-        up_mbps: None,
-        down_mbps: None,
-        obfs: None,
-        obfs_password: None,
-    })
-}
-
-#[tauri::command]
 fn parse_hysteria2_link(link: String) -> Result<VlessConfig, String> {
     let without_prefix = link
         .strip_prefix("hysteria2://")
@@ -570,12 +479,10 @@ async fn fetch_subscription(url: String) -> Result<Vec<VlessConfig>, String> {
 #[tauri::command]
 fn parse_share_link(link: String) -> Result<VlessConfig, String> {
     let trimmed = link.trim();
-    if trimmed.starts_with("vless://") {
-        parse_vless_link(trimmed.to_string())
-    } else if trimmed.starts_with("hysteria2://") || trimmed.starts_with("hy2://") {
+    if trimmed.starts_with("hysteria2://") || trimmed.starts_with("hy2://") {
         parse_hysteria2_link(trimmed.to_string())
     } else {
-        Err("Unsupported link format. Use vless:// or hysteria2://".to_string())
+        Err("Unsupported link format. Use hysteria2:// or hy2://".to_string())
     }
 }
 
@@ -633,7 +540,7 @@ struct SingboxConfig {
 
 #[tauri::command]
 fn import_config_json(json_content: String) -> Result<VlessConfig, String> {
-    let supported_types = ["vless", "hysteria2"];
+    let supported_types = ["hysteria2"];
 
     // Try to parse as full config first
     let outbound = if let Ok(config) = serde_json::from_str::<SingboxConfig>(&json_content) {
@@ -641,10 +548,10 @@ fn import_config_json(json_content: String) -> Result<VlessConfig, String> {
             .outbounds
             .into_iter()
             .find(|o| supported_types.contains(&o.outbound_type.as_str()))
-            .ok_or("No vless or hysteria2 outbound found in config")?
+            .ok_or("No hysteria2 outbound found in config")?
     } else if let Ok(outbound) = serde_json::from_str::<SingboxOutbound>(&json_content) {
         if !supported_types.contains(&outbound.outbound_type.as_str()) {
-            return Err("Config is not a vless or hysteria2 outbound".to_string());
+            return Err("Config is not a hysteria2 outbound".to_string());
         }
         outbound
     } else {
@@ -655,104 +562,34 @@ fn import_config_json(json_content: String) -> Result<VlessConfig, String> {
     let port = outbound.server_port.ok_or("Missing server port")?;
     let name = outbound.tag.unwrap_or_else(|| "Imported Server".to_string());
 
-    // Handle Hysteria2 outbound
-    if outbound.outbound_type == "hysteria2" {
-        let password = outbound.password.ok_or("Missing password")?;
-        let mut host = address.clone();
-
-        if let Some(tls) = outbound.tls {
-            if let Some(sni) = tls.server_name {
-                host = sni;
-            }
-        }
-
-        let obfs = outbound.obfs.as_ref().and_then(|o| o.obfs_type.clone());
-        let obfs_password = outbound.obfs.as_ref().and_then(|o| o.password.clone());
-
-        return Ok(VlessConfig {
-            protocol: Some("hysteria2".to_string()),
-            uuid: password,
-            address,
-            port,
-            security: "tls".to_string(),
-            transport_type: "".to_string(),
-            path: "".to_string(),
-            host,
-            name,
-            routing_mode: None,
-            target_country: None,
-            up_mbps: outbound.up_mbps,
-            down_mbps: outbound.down_mbps,
-            obfs,
-            obfs_password,
-        });
-    }
-
-    // Handle VLESS outbound
-    let uuid = outbound.uuid.ok_or("Missing UUID")?;
-
-    let mut security = "none".to_string();
-    let mut path = String::new();
-    let mut host = String::new();
-    let mut transport_type = "tcp".to_string();
+    let password = outbound.password.ok_or("Missing password")?;
+    let mut host = address.clone();
 
     if let Some(tls) = outbound.tls {
-        if tls.enabled.unwrap_or(false) {
-            security = "tls".to_string();
-            if let Some(sni) = tls.server_name {
-                host = sni;
-            }
-
-            if let Some(reality) = tls.reality {
-                if reality.enabled.unwrap_or(false) {
-                    security = "reality".to_string();
-                    let pbk = reality.public_key.unwrap_or_default();
-                    let sid = reality.short_id.unwrap_or_default();
-                    let fp = reality.fingerprint.unwrap_or_else(|| "chrome".to_string());
-                    path = format!("pbk={}&sid={}&fp={}", pbk, sid, fp);
-                }
-            }
+        if let Some(sni) = tls.server_name {
+            host = sni;
         }
     }
 
-    if let Some(transport) = outbound.transport {
-        if let Some(tt) = transport.transport_type {
-            transport_type = tt;
-        }
-
-        if security != "reality" {
-            if let Some(p) = transport.path {
-                path = p;
-            } else if let Some(sn) = transport.service_name {
-                path = sn;
-            }
-
-            if host.is_empty() {
-                if let Some(headers) = transport.headers {
-                    if let Some(h) = headers.get("Host") {
-                        host = h.clone();
-                    }
-                }
-            }
-        }
-    }
+    let obfs = outbound.obfs.as_ref().and_then(|o| o.obfs_type.clone());
+    let obfs_password = outbound.obfs.as_ref().and_then(|o| o.password.clone());
 
     Ok(VlessConfig {
-        protocol: Some("vless".to_string()),
-        uuid,
+        protocol: Some("hysteria2".to_string()),
+        uuid: password,
         address,
         port,
-        security,
-        transport_type,
-        path,
+        security: "tls".to_string(),
+        transport_type: "".to_string(),
+        path: "".to_string(),
         host,
         name,
         routing_mode: None,
         target_country: None,
-        up_mbps: None,
-        down_mbps: None,
-        obfs: None,
-        obfs_password: None,
+        up_mbps: outbound.up_mbps,
+        down_mbps: outbound.down_mbps,
+        obfs,
+        obfs_password,
     })
 }
 
@@ -1235,7 +1072,6 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             check_singbox_installed,
             download_singbox,
-            parse_vless_link,
             parse_hysteria2_link,
             parse_share_link,
             fetch_subscription,
@@ -1334,114 +1170,6 @@ fn main() {
 mod tests {
     use super::*;
 
-    // ==================== parse_vless_link tests ====================
-
-    #[test]
-    fn test_parse_vless_ws_full() {
-        let link = "vless://550e8400-e29b-41d4-a716-446655440000@example.com:443?security=tls&type=ws&path=%2Fws&host=cdn.example.com&sni=cdn.example.com#My%20Server";
-        let config = parse_vless_link(link.to_string()).unwrap();
-        assert_eq!(config.uuid, "550e8400-e29b-41d4-a716-446655440000");
-        assert_eq!(config.address, "example.com");
-        assert_eq!(config.port, 443);
-        assert_eq!(config.security, "tls");
-        assert_eq!(config.transport_type, "ws");
-        assert_eq!(config.path, "/ws");
-        assert_eq!(config.host, "cdn.example.com");
-        assert_eq!(config.name, "My Server");
-        assert_eq!(config.protocol.as_deref(), Some("vless"));
-    }
-
-    #[test]
-    fn test_parse_vless_reality() {
-        let link = "vless://uuid123@1.2.3.4:443?security=reality&type=tcp&sni=www.google.com&fp=chrome&pbk=PUBKEY123&sid=SHORTID#Reality";
-        let config = parse_vless_link(link.to_string()).unwrap();
-        assert_eq!(config.uuid, "uuid123");
-        assert_eq!(config.address, "1.2.3.4");
-        assert_eq!(config.port, 443);
-        assert_eq!(config.security, "reality");
-        assert_eq!(config.transport_type, "tcp");
-        assert_eq!(config.host, "www.google.com");
-        assert!(config.path.contains("pbk=PUBKEY123"));
-        assert!(config.path.contains("sid=SHORTID"));
-        assert!(config.path.contains("fp=chrome"));
-        assert_eq!(config.name, "Reality");
-    }
-
-    #[test]
-    fn test_parse_vless_tcp_no_security() {
-        let link = "vless://myuuid@10.0.0.1:8080?type=tcp#Plain";
-        let config = parse_vless_link(link.to_string()).unwrap();
-        assert_eq!(config.security, "none");
-        assert_eq!(config.transport_type, "tcp");
-        assert_eq!(config.path, "");
-    }
-
-    #[test]
-    fn test_parse_vless_url_encoded_name() {
-        let link = "vless://uuid@host:443?type=tcp#%D0%A1%D0%B5%D1%80%D0%B2%D0%B5%D1%80";
-        let config = parse_vless_link(link.to_string()).unwrap();
-        assert_eq!(config.name, "Сервер");
-    }
-
-    #[test]
-    fn test_parse_vless_no_fragment() {
-        let link = "vless://uuid@host:443?type=tcp";
-        let config = parse_vless_link(link.to_string()).unwrap();
-        assert_eq!(config.name, "Unnamed");
-    }
-
-    #[test]
-    fn test_parse_vless_wrong_prefix() {
-        let result = parse_vless_link("https://example.com".to_string());
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Invalid VLESS link"));
-    }
-
-    #[test]
-    fn test_parse_vless_missing_at() {
-        let result = parse_vless_link("vless://uuidhost:443?type=tcp".to_string());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_vless_missing_query() {
-        let result = parse_vless_link("vless://uuid@host:443".to_string());
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_vless_invalid_port() {
-        let result = parse_vless_link("vless://uuid@host:abc?type=tcp".to_string());
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Invalid port"));
-    }
-
-    #[test]
-    fn test_parse_vless_empty_uuid() {
-        let link = "vless://@host:443?type=tcp";
-        let config = parse_vless_link(link.to_string()).unwrap();
-        assert_eq!(config.uuid, "");
-    }
-
-    #[test]
-    fn test_parse_vless_default_values() {
-        let link = "vless://uuid@host:443?foo=bar";
-        let config = parse_vless_link(link.to_string()).unwrap();
-        assert_eq!(config.security, "none");
-        assert_eq!(config.transport_type, "tcp");
-    }
-
-    #[test]
-    fn test_parse_vless_protocol_field() {
-        let link = "vless://uuid@host:443?type=tcp";
-        let config = parse_vless_link(link.to_string()).unwrap();
-        assert_eq!(config.protocol, Some("vless".to_string()));
-        assert_eq!(config.up_mbps, None);
-        assert_eq!(config.down_mbps, None);
-        assert_eq!(config.obfs, None);
-        assert_eq!(config.obfs_password, None);
-    }
-
     // ==================== parse_hysteria2_link tests ====================
 
     #[test]
@@ -1528,13 +1256,6 @@ mod tests {
     // ==================== parse_share_link tests ====================
 
     #[test]
-    fn test_share_link_routes_vless() {
-        let link = "vless://uuid@host:443?type=tcp#Name";
-        let config = parse_share_link(link.to_string()).unwrap();
-        assert_eq!(config.protocol.as_deref(), Some("vless"));
-    }
-
-    #[test]
     fn test_share_link_routes_hysteria2() {
         let link = "hysteria2://pass@host:443#Name";
         let config = parse_share_link(link.to_string()).unwrap();
@@ -1549,10 +1270,10 @@ mod tests {
     }
 
     #[test]
-    fn test_share_link_whitespace_trimming() {
-        let link = "  vless://uuid@host:443?type=tcp#Name  ";
-        let config = parse_share_link(link.to_string()).unwrap();
-        assert_eq!(config.protocol.as_deref(), Some("vless"));
+    fn test_share_link_rejects_vless() {
+        let link = "vless://uuid@host:443?type=tcp#Name";
+        let result = parse_share_link(link.to_string());
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1563,104 +1284,6 @@ mod tests {
     }
 
     // ==================== import_config_json tests ====================
-
-    #[test]
-    fn test_import_full_singbox_config_vless() {
-        let json = r#"{
-            "outbounds": [
-                {
-                    "type": "vless",
-                    "tag": "proxy",
-                    "server": "1.2.3.4",
-                    "server_port": 443,
-                    "uuid": "test-uuid-123",
-                    "tls": {
-                        "enabled": true,
-                        "server_name": "example.com"
-                    },
-                    "transport": {
-                        "type": "ws",
-                        "path": "/ws",
-                        "headers": {"Host": "cdn.example.com"}
-                    }
-                },
-                {"type": "direct", "tag": "direct"}
-            ]
-        }"#;
-        let config = import_config_json(json.to_string()).unwrap();
-        assert_eq!(config.uuid, "test-uuid-123");
-        assert_eq!(config.address, "1.2.3.4");
-        assert_eq!(config.port, 443);
-        assert_eq!(config.security, "tls");
-        assert_eq!(config.transport_type, "ws");
-        assert_eq!(config.path, "/ws");
-        assert_eq!(config.host, "example.com"); // TLS server_name takes priority
-        assert_eq!(config.name, "proxy");
-        assert_eq!(config.protocol.as_deref(), Some("vless"));
-    }
-
-    #[test]
-    fn test_import_single_vless_outbound() {
-        let json = r#"{
-            "type": "vless",
-            "tag": "my-server",
-            "server": "10.0.0.1",
-            "server_port": 8443,
-            "uuid": "abc-def"
-        }"#;
-        let config = import_config_json(json.to_string()).unwrap();
-        assert_eq!(config.uuid, "abc-def");
-        assert_eq!(config.address, "10.0.0.1");
-        assert_eq!(config.port, 8443);
-        assert_eq!(config.security, "none");
-        assert_eq!(config.transport_type, "tcp");
-        assert_eq!(config.name, "my-server");
-    }
-
-    #[test]
-    fn test_import_vless_reality() {
-        let json = r#"{
-            "type": "vless",
-            "server": "5.6.7.8",
-            "server_port": 443,
-            "uuid": "uuid-reality",
-            "tls": {
-                "enabled": true,
-                "server_name": "www.google.com",
-                "reality": {
-                    "enabled": true,
-                    "public_key": "abc123",
-                    "short_id": "deadbeef",
-                    "fingerprint": "firefox"
-                }
-            }
-        }"#;
-        let config = import_config_json(json.to_string()).unwrap();
-        assert_eq!(config.security, "reality");
-        assert!(config.path.contains("pbk=abc123"));
-        assert!(config.path.contains("sid=deadbeef"));
-        assert!(config.path.contains("fp=firefox"));
-        assert_eq!(config.host, "www.google.com");
-    }
-
-    #[test]
-    fn test_import_vless_ws_transport() {
-        let json = r#"{
-            "type": "vless",
-            "server": "server.com",
-            "server_port": 443,
-            "uuid": "uuid-ws",
-            "tls": {"enabled": true, "server_name": "cdn.com"},
-            "transport": {
-                "type": "ws",
-                "path": "/path"
-            }
-        }"#;
-        let config = import_config_json(json.to_string()).unwrap();
-        assert_eq!(config.transport_type, "ws");
-        assert_eq!(config.path, "/path");
-        assert_eq!(config.host, "cdn.com");
-    }
 
     #[test]
     fn test_import_hysteria2_outbound() {
@@ -1717,7 +1340,7 @@ mod tests {
         }"#;
         let result = import_config_json(json.to_string());
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("No vless or hysteria2 outbound"));
+        assert!(result.unwrap_err().contains("No hysteria2 outbound"));
     }
 
     #[test]
@@ -1730,9 +1353,9 @@ mod tests {
     #[test]
     fn test_import_missing_server() {
         let json = r#"{
-            "type": "vless",
+            "type": "hysteria2",
             "server_port": 443,
-            "uuid": "test"
+            "password": "test"
         }"#;
         let result = import_config_json(json.to_string());
         assert!(result.is_err());
@@ -1742,9 +1365,9 @@ mod tests {
     #[test]
     fn test_import_missing_port() {
         let json = r#"{
-            "type": "vless",
+            "type": "hysteria2",
             "server": "host.com",
-            "uuid": "test"
+            "password": "test"
         }"#;
         let result = import_config_json(json.to_string());
         assert!(result.is_err());
@@ -1754,10 +1377,10 @@ mod tests {
     #[test]
     fn test_import_default_tag_name() {
         let json = r#"{
-            "type": "vless",
+            "type": "hysteria2",
             "server": "host.com",
             "server_port": 443,
-            "uuid": "test"
+            "password": "test"
         }"#;
         let config = import_config_json(json.to_string()).unwrap();
         assert_eq!(config.name, "Imported Server");
@@ -1776,18 +1399,6 @@ mod tests {
     }
 
     #[test]
-    fn test_import_vless_missing_uuid() {
-        let json = r#"{
-            "type": "vless",
-            "server": "host.com",
-            "server_port": 443
-        }"#;
-        let result = import_config_json(json.to_string());
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Missing UUID"));
-    }
-
-    #[test]
     fn test_import_unsupported_type_single() {
         let json = r#"{
             "type": "shadowsocks",
@@ -1797,27 +1408,6 @@ mod tests {
         }"#;
         let result = import_config_json(json.to_string());
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("not a vless or hysteria2"));
-    }
-
-    #[test]
-    fn test_import_reality_default_fingerprint() {
-        let json = r#"{
-            "type": "vless",
-            "server": "1.2.3.4",
-            "server_port": 443,
-            "uuid": "uuid",
-            "tls": {
-                "enabled": true,
-                "server_name": "example.com",
-                "reality": {
-                    "enabled": true,
-                    "public_key": "pk123",
-                    "short_id": "sid"
-                }
-            }
-        }"#;
-        let config = import_config_json(json.to_string()).unwrap();
-        assert!(config.path.contains("fp=chrome")); // default fingerprint
+        assert!(result.unwrap_err().contains("not a hysteria2"));
     }
 }

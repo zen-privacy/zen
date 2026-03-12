@@ -5888,9 +5888,10 @@ dependencies = [
 
 [[package]]
 name = "zen-privacy"
-version = "2.0.0-beta"
+version = "2.1.0-beta"
 dependencies = [
  "backon",
+ "base64 0.22.1",
  "dirs 5.0.1",
  "flate2",
  "reqwest 0.11.27",

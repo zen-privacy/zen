@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Configuration for a VPN connection (VLESS or Hysteria2)
+/// Configuration for a Hysteria2 VPN connection
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct VlessConfig {
     pub uuid: String,
@@ -18,7 +18,7 @@ pub struct VlessConfig {
     pub name: String,
     pub routing_mode: Option<String>,
     pub target_country: Option<String>,
-    /// Protocol type: "vless" (default) or "hysteria2"
+    /// Protocol type (always "hysteria2")
     #[serde(default)]
     pub protocol: Option<String>,
     /// Hysteria2: upload bandwidth in Mbps

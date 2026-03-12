@@ -21,7 +21,6 @@
 
 ## Features
 
-- **VLESS Protocol** — VLESS with Reality, WebSocket+TLS transport
 - **Hysteria2 Protocol** — QUIC-based protocol with optional obfuscation
 - **TUN Mode** — Routes all system traffic through encrypted tunnel
 - **Kill Switch** — Blocks traffic on VPN disconnect to prevent IP leaks
@@ -29,7 +28,7 @@
 - **Smart Routing** — Country-based rule sets for selective proxying
 - **Traffic Stats** — Real-time upload/download monitoring
 - **Auto-updates** — Built-in update mechanism with one-click installation
-- **Cross-platform** — Windows and Linux support
+- **Cross-platform** — Windows, macOS, and Linux support
 - **Auto-download Engine** — sing-box core downloaded automatically
 
 ## Installation
@@ -54,7 +53,7 @@ sudo dnf install zen-privacy-*.x86_64.rpm
 
 1. **Launch** Zen Privacy from your applications menu
 2. **Download Engine** — Click the button on first run (one-time setup)
-3. **Add Server** — Paste a `vless://` or `hysteria2://` link, or import a sing-box JSON config
+3. **Add Server** — Paste a `hysteria2://` link, import a sing-box JSON config, or use a subscription URL
 4. **Connect** — Click the mask to connect
 5. **Enjoy** — Your traffic is now protected
 
