@@ -90,6 +90,8 @@ function App() {
   const [ruleSets, setRuleSets] = useState<RuleSetInfo[]>([])
   const [importModalOpen, setImportModalOpen] = useState(false)
   const [importContent, setImportContent] = useState('')
+  const [subUrl, setSubUrl] = useState('')
+  const [isFetchingSub, setIsFetchingSub] = useState(false)
 
   const invoke = window.__TAURI__?.core?.invoke
 
@@ -252,6 +254,38 @@ function App() {
       setSelectedId(profile.id)
     } catch (e) {
       setError(String(e))
+    }
+  }
+
+  const handleFetchSubscription = async () => {
+    if (!invoke || !subUrl.trim()) return
+    setError(null)
+    setIsFetchingSub(true)
+
+    try {
+      const configs = await invoke<VlessConfig[]>('fetch_subscription', { url: subUrl.trim() })
+      let added = 0
+      for (const config of configs) {
+        if (!config.address || !config.port || config.port < 1 || config.port > 65535) continue
+        const profile: Profile = {
+          id: crypto.randomUUID(),
+          name: config.name || `Server ${added + 1}`,
+          config,
+        }
+        await invoke('save_profile', { profile })
+        added++
+      }
+      if (added > 0) {
+        await loadProfiles()
+        setSubUrl('')
+        toast.success(`Imported ${added} server${added > 1 ? 's' : ''} from subscription`)
+      } else {
+        setError('No valid profiles found in subscription')
+      }
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setIsFetchingSub(false)
     }
   }
 
@@ -476,6 +510,23 @@ function App() {
           <button className="btn-import-json" onClick={() => setImportModalOpen(true)}>
             Import Config (JSON)
           </button>
+
+          <div className="add-server sub-input">
+            <input
+              type="text"
+              placeholder="Subscription URL"
+              value={subUrl}
+              onChange={(e) => setSubUrl(e.target.value)}
+              onKeyPress={(e) => e.key === 'Enter' && handleFetchSubscription()}
+            />
+            <button
+              className="btn-add"
+              onClick={handleFetchSubscription}
+              disabled={isFetchingSub || !subUrl.trim()}
+            >
+              {isFetchingSub ? '...' : 'Fetch'}
+            </button>
+          </div>
           {error && <div className="error-message">{error}</div>}
         </section>
 

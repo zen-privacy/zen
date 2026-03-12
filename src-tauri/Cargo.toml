@@ -25,6 +25,7 @@ dirs = "5"
 backon = { version = "1", features = ["tokio-sleep"] }
 semver = "1"
 sha2 = "0.10"
+base64 = "0.22"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.54", features = [

@@ -512,6 +512,62 @@ fn parse_hysteria2_link(link: String) -> Result<VlessConfig, String> {
 }
 
 #[tauri::command]
+async fn fetch_subscription(url: String) -> Result<Vec<VlessConfig>, String> {
+    use base64::Engine;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let response = client
+        .get(&url)
+        .header("User-Agent", "ZenPrivacy/2.1")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch subscription: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Subscription fetch failed: HTTP {}", response.status()));
+    }
+
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+
+    let trimmed = body.trim();
+
+    // Try base64 decode first (standard subscription format)
+    let lines = if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(trimmed) {
+        String::from_utf8(decoded).unwrap_or_else(|_| trimmed.to_string())
+    } else if let Ok(decoded) = base64::engine::general_purpose::STANDARD_NO_PAD.decode(trimmed) {
+        String::from_utf8(decoded).unwrap_or_else(|_| trimmed.to_string())
+    } else {
+        // Not base64 — might be plain text with links
+        trimmed.to_string()
+    };
+
+    let mut configs = Vec::new();
+    for line in lines.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Try parsing each line as a share link
+        if let Ok(config) = parse_share_link(line.to_string()) {
+            configs.push(config);
+        }
+    }
+
+    if configs.is_empty() {
+        return Err("No valid profiles found in subscription".to_string());
+    }
+
+    Ok(configs)
+}
+
+#[tauri::command]
 fn parse_share_link(link: String) -> Result<VlessConfig, String> {
     let trimmed = link.trim();
     if trimmed.starts_with("vless://") {
@@ -1182,6 +1238,7 @@ fn main() {
             parse_vless_link,
             parse_hysteria2_link,
             parse_share_link,
+            fetch_subscription,
             import_config_json,
             save_profile,
             load_profiles,
