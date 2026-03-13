@@ -238,6 +238,127 @@ const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 const RECONNECT_INITIAL_DELAY_MS: u64 = 1000;
 const RECONNECT_MAX_DELAY_MS: u64 = 30000;
 
+/// macOS LaunchDaemon label and install path
+#[cfg(target_os = "macos")]
+const LAUNCHD_LABEL: &str = "com.zen.vpn";
+#[cfg(target_os = "macos")]
+const LAUNCHD_PLIST_INSTALL_PATH: &str = "/Library/LaunchDaemons/com.zen.vpn.plist";
+
+#[cfg(target_os = "macos")]
+fn get_launcher_script_path() -> PathBuf {
+    get_config_dir().join("zen-vpn-launcher.sh")
+}
+
+#[cfg(target_os = "macos")]
+fn get_launchd_plist_path() -> PathBuf {
+    get_config_dir().join("com.zen.vpn.plist")
+}
+
+/// Check if the launchd job is currently loaded in the system domain
+#[cfg(target_os = "macos")]
+fn is_launchd_job_loaded() -> bool {
+    std::process::Command::new("launchctl")
+        .args(["print", &format!("system/{}", LAUNCHD_LABEL)])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Generate the launcher script that launchd runs.
+/// Sets up routes + pfctl, then execs sing-box so launchd tracks the real PID.
+#[cfg(target_os = "macos")]
+fn generate_launcher_script(
+    server_address: &str,
+    singbox_path: &PathBuf,
+    config_path: &PathBuf,
+    pf_conf_path: &PathBuf,
+    skip_killswitch: bool,
+) -> String {
+    format!(
+        r#"#!/bin/bash
+SERVER="{server}"
+SINGBOX="{singbox}"
+CONFIG="{config}"
+PF_CONF="{pf_conf}"
+SKIP_KS="{skip_ks}"
+DNS_BACKUP="{dns_backup}"
+
+# Routes
+GW=$(route -n get default 2>/dev/null | grep gateway | awk '{{print $2}}')
+if [ -n "$GW" ]; then
+    route delete -host "$SERVER" >/dev/null 2>&1
+    route add -host "$SERVER" "$GW" >/dev/null 2>&1
+fi
+
+# Kill switch
+if [ "$SKIP_KS" != "1" ] && [ -f "$PF_CONF" ]; then
+    pfctl -a 'com.zen.vpn' -f "$PF_CONF" 2>/dev/null
+    pfctl -e 2>/dev/null
+fi
+
+# Override system DNS to prevent leaks (save original first)
+for svc in $(networksetup -listallnetworkservices 2>/dev/null | tail -n +2 | grep -v '^\*'); do
+    old_dns=$(networksetup -getdnsservers "$svc" 2>/dev/null)
+    if echo "$old_dns" | grep -q "any DNS"; then
+        echo "$svc=empty" >> "$DNS_BACKUP"
+    else
+        echo "$svc=$(echo $old_dns | tr '\n' ',')" >> "$DNS_BACKUP"
+    fi
+    networksetup -setdnsservers "$svc" 223.5.5.5 1.1.1.1 2>/dev/null
+done
+dscacheutil -flushcache 2>/dev/null
+killall -HUP mDNSResponder 2>/dev/null
+
+# Replace this process with sing-box (launchd tracks the PID)
+exec "$SINGBOX" run -c "$CONFIG"
+"#,
+        server = server_address,
+        singbox = singbox_path.to_string_lossy(),
+        config = config_path.to_string_lossy(),
+        pf_conf = pf_conf_path.to_string_lossy(),
+        skip_ks = if skip_killswitch { "1" } else { "0" },
+        dns_backup = get_config_dir().join("dns-backup.txt").to_string_lossy(),
+    )
+}
+
+/// Generate the launchd plist XML for the sing-box daemon
+#[cfg(target_os = "macos")]
+fn generate_launchd_plist(launcher_path: &PathBuf, log_path: &PathBuf) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{launcher}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>3</integer>
+    <key>StandardOutPath</key>
+    <string>{log}</string>
+    <key>StandardErrorPath</key>
+    <string>{log}</string>
+</dict>
+</plist>"#,
+        label = LAUNCHD_LABEL,
+        launcher = launcher_path.to_string_lossy(),
+        log = log_path.to_string_lossy(),
+    )
+}
+
 /// Spawn a health monitor that automatically reconnects on sing-box crash
 ///
 /// This function starts a background task that:
@@ -265,47 +386,66 @@ pub fn spawn_auto_reconnect_monitor(
     HealthMonitor::spawn(state_for_monitor.clone(), config, move |result| {
         // Only handle process death - not ping failures or running status
         if let HealthCheckResult::ProcessNotRunning { exit_code } = result {
-            state_for_monitor.log(
-                LogLevel::Warn,
-                format!("Sing-box process crashed (exit code: {:?}), attempting reconnection...", exit_code)
-            );
-
-            // Check if we should attempt reconnection
-            if vpn_manager_clone.is_shutdown_requested() {
-                // User requested shutdown, don't reconnect
+            // Skip if reconnection is already in progress or shutdown requested
+            if vpn_manager_clone.is_reconnecting() || vpn_manager_clone.is_connecting() || vpn_manager_clone.is_shutdown_requested() {
                 return;
             }
 
-            // Get stored config for reconnection
-            let config = match state_for_monitor.get_config() {
-                Some(c) => c,
-                None => {
-                    state_for_monitor.log(
-                        LogLevel::Error,
-                        "Cannot reconnect: no VPN configuration stored".to_string()
-                    );
-                    emit_vpn_event(
-                        &app_handle_clone,
-                        VpnEvent::error("Cannot reconnect: no configuration available", Some("NO_CONFIG".to_string()))
-                    );
-                    return;
-                }
-            };
+            state_for_monitor.log(
+                LogLevel::Warn,
+                format!("Sing-box process died (exit code: {:?})", exit_code)
+            );
 
-            // Clone everything needed for the async reconnection task
-            let state_for_reconnect = Arc::clone(&state_for_monitor);
-            let app_handle_for_reconnect = app_handle_clone.clone();
-            let vpn_manager_for_reconnect = Arc::clone(&vpn_manager_clone);
+            // On macOS, launchd handles restarts via KeepAlive. If we get here,
+            // it means both sing-box AND the launchd job are gone — launchd gave up.
+            // Report failure; user needs to reconnect manually.
+            #[cfg(target_os = "macos")]
+            {
+                vpn_manager_clone.set_state(ConnectionState::Failed);
+                emit_vpn_event(
+                    &app_handle_clone,
+                    VpnEvent::error(
+                        "VPN process died. Please reconnect.",
+                        Some("DAEMON_DIED".to_string())
+                    )
+                );
+                state_for_monitor.stop_health_monitor();
+                return;
+            }
 
-            // Spawn async reconnection task
-            tokio::spawn(async move {
-                attempt_reconnection(
-                    state_for_reconnect,
-                    vpn_manager_for_reconnect,
-                    app_handle_for_reconnect,
-                    config,
-                ).await;
-            });
+            // On Linux/Windows, attempt reconnection ourselves
+            #[cfg(not(target_os = "macos"))]
+            {
+                let config = match state_for_monitor.get_config() {
+                    Some(c) => c,
+                    None => {
+                        state_for_monitor.log(
+                            LogLevel::Error,
+                            "Cannot reconnect: no VPN configuration stored".to_string()
+                        );
+                        emit_vpn_event(
+                            &app_handle_clone,
+                            VpnEvent::error("Cannot reconnect: no configuration available", Some("NO_CONFIG".to_string()))
+                        );
+                        return;
+                    }
+                };
+
+                vpn_manager_clone.set_state(ConnectionState::Reconnecting);
+
+                let state_for_reconnect = Arc::clone(&state_for_monitor);
+                let app_handle_for_reconnect = app_handle_clone.clone();
+                let vpn_manager_for_reconnect = Arc::clone(&vpn_manager_clone);
+
+                tokio::spawn(async move {
+                    attempt_reconnection(
+                        state_for_reconnect,
+                        vpn_manager_for_reconnect,
+                        app_handle_for_reconnect,
+                        config,
+                    ).await;
+                });
+            }
         }
     })
 }
@@ -360,10 +500,11 @@ async fn attempt_reconnection(
             Ok(()) => {
                 state.log(LogLevel::Info, format!("Reconnection successful on attempt {}", attempt));
 
-                // On Linux/macOS, re-enable real firewall kill switch
-                // On Windows, strict_route handles it
-                #[cfg(not(target_os = "windows"))]
-                {
+                // On macOS, reconnect_singbox already sets up pfctl rules in the same
+                // osascript session, so we don't need a separate auto_enable_killswitch call.
+                // On Linux, re-enable real firewall kill switch. On Windows, strict_route handles it.
+                #[cfg(target_os = "linux")]
+                if !config.diag_no_killswitch.unwrap_or(false) {
                     auto_enable_killswitch(&config.address, &app_handle);
                     state.log(LogLevel::Info, "Kill switch re-enabled after reconnection".to_string());
                 }
@@ -384,6 +525,22 @@ async fn attempt_reconnection(
                 return;
             }
             Err(e) => {
+                // If user cancelled the osascript password dialog, stop reconnecting
+                if e.contains("User canceled") || e.contains("(-128)") {
+                    state.log(
+                        LogLevel::Info,
+                        "Reconnection cancelled by user (password dialog dismissed)".to_string()
+                    );
+                    vpn_manager.set_state(ConnectionState::Disconnected);
+                    vpn_manager.request_shutdown();
+                    state.stop_health_monitor();
+                    emit_vpn_event(
+                        &app_handle,
+                        VpnEvent::disconnected(Some("User cancelled authentication".to_string()))
+                    );
+                    return;
+                }
+
                 state.log(
                     LogLevel::Warn,
                     format!("Reconnection attempt {} failed: {}", attempt, e)
@@ -395,8 +552,9 @@ async fn attempt_reconnection(
         delay_ms = (delay_ms * 2).min(RECONNECT_MAX_DELAY_MS);
     }
 
-    // Max retries reached - keep kill switch active to prevent IP leaks
-    // User must explicitly disconnect to disable it
+    // Max retries reached - stop health monitor to prevent further reconnection cycles
+    // Keep kill switch active to prevent IP leaks
+    state.stop_health_monitor();
     state.log(
         LogLevel::Error,
         format!("Reconnection failed after {} attempts. Kill switch remains active to prevent IP leaks. Disconnect manually to restore network.", MAX_RECONNECT_ATTEMPTS)
@@ -414,10 +572,39 @@ async fn attempt_reconnection(
 /// Internal function to reconnect sing-box without emitting events
 /// Used by the reconnection logic to avoid duplicate events
 async fn reconnect_singbox(
-    state: &AppState,
-    config: &VlessConfig,
+    #[allow(unused_variables)] state: &AppState,
+    #[allow(unused_variables)] config: &VlessConfig,
     _app_handle: &AppHandle,
 ) -> Result<(), String> {
+    // On macOS, launchd handles restart — we just wait. On other platforms, we
+    // need to regenerate config and restart the process ourselves.
+    #[cfg(target_os = "macos")]
+    {
+        // Config file is already updated by the caller (attempt_reconnection).
+        // LaunchDaemon handles auto-restart via KeepAlive. Just wait for it.
+        if !is_launchd_job_loaded() {
+            return Err("LaunchDaemon is not loaded — cannot reconnect".to_string());
+        }
+
+        for _ in 0..150 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let check = std::process::Command::new("pgrep").arg("-x").arg("sing-box").output();
+            if let Ok(out) = check {
+                if out.status.success() {
+                    return Ok(());
+                }
+            }
+            if !is_launchd_job_loaded() {
+                return Err("LaunchDaemon was removed during reconnection".to_string());
+            }
+        }
+
+        return Err("Reconnection timeout".to_string());
+    }
+
+    // Non-macOS: regenerate config and restart process
+    #[cfg(not(target_os = "macos"))]
+    {
     // Clear previous log file
     clear_log_file()?;
 
@@ -475,27 +662,10 @@ async fn reconnect_singbox(
         Err("Reconnection timeout".to_string())
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
-        // On macOS, use osascript for elevation; on Linux, use pkexec
-        #[cfg(target_os = "macos")]
-        let cmd = {
-            let inner_cmd = format!(
-                "{} run -c {} > {} 2>&1",
-                singbox_path.to_string_lossy(),
-                config_path.to_string_lossy(),
-                log_path.to_string_lossy()
-            );
-            let escaped = inner_cmd.replace('\\', "\\\\").replace('"', "\\\"");
-            format!(
-                "osascript -e 'do shell script \"{}\" with administrator privileges'",
-                escaped
-            )
-        };
-
-        #[cfg(not(target_os = "macos"))]
         let cmd = format!(
-            "pkexec {} run -c {} > {} 2>&1",
+            "pkexec '{}' run -c '{}' > '{}' 2>&1",
             singbox_path.to_string_lossy(),
             config_path.to_string_lossy(),
             log_path.to_string_lossy()
@@ -509,16 +679,29 @@ async fn reconnect_singbox(
             .spawn()
             .map_err(|e| format!("Failed to start sing-box: {}", e))?;
 
-        // Wait for sing-box to start
         for _ in 0..300 {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    let detail = match child.wait_with_output().await {
+                        Ok(output) => {
+                            let stderr_str = String::from_utf8_lossy(&output.stderr);
+                            let stdout_str = String::from_utf8_lossy(&output.stdout);
+                            if !stderr_str.trim().is_empty() {
+                                stderr_str.trim().to_string()
+                            } else if !stdout_str.trim().is_empty() {
+                                stdout_str.trim().to_string()
+                            } else {
+                                format!("exit code: {}", status)
+                            }
+                        }
+                        Err(_) => format!("exit code: {}", status),
+                    };
                     if !status.success() {
-                        return Err("Authentication cancelled or failed".to_string());
+                        return Err(format!("Authentication or launch failed: {}", detail));
                     }
-                    return Err("sing-box exited unexpectedly".to_string());
+                    return Err(format!("sing-box exited unexpectedly: {}", detail));
                 }
                 Ok(None) => {
                     let output = std::process::Command::new("pgrep")
@@ -543,6 +726,7 @@ async fn reconnect_singbox(
         let _ = child.kill().await;
         Err("Reconnection timeout".to_string())
     }
+    } // end #[cfg(not(target_os = "macos"))]
 }
 
 /// Get available country rule sets
@@ -624,14 +808,25 @@ pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
     let server_ip = resolve_server_ip(&config.address);
 
     // Configure inbounds/inbound[0] based on platform
-    let (inet4_address, strict_route, stack) = if cfg!(target_os = "windows") {
+    let (inet4_address, strict_route, default_stack) = if cfg!(target_os = "windows") {
         ("172.19.0.1/30", true, "gvisor")
     } else if cfg!(target_os = "macos") {
-        ("100.64.0.1/30", true, "system")
+        // On macOS, strict_route causes routing loops: it captures ALL packets
+        // at the OS level (including traffic to the VPN server itself) before
+        // sing-box routing rules can bypass them via direct outbound.
+        ("100.64.0.1/30", false, "system")
     } else {
         // Linux
         ("100.64.0.1/30", true, "gvisor")
     };
+
+    // Diagnostic overrides
+    let stack = config.diag_stack.as_deref().unwrap_or(default_stack);
+    let mtu = config.diag_mtu.unwrap_or(1400);
+    let sniff = config.diag_sniff.unwrap_or(true);
+    let plain_dns = config.diag_plain_dns.unwrap_or(false);
+    let udp_timeout = config.diag_udp_timeout;
+    let endpoint_independent_nat = config.diag_endpoint_independent_nat.unwrap_or(true);
 
     // Prepare routing mode / country
     let routing_mode = config.routing_mode.as_deref().unwrap_or("global");
@@ -732,18 +927,28 @@ pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
     }
 
     // Build Hysteria2 proxy outbound
-    let mut proxy_outbound = serde_json::json!({
-        "type": "hysteria2",
-        "tag": "proxy",
-        "server": server_ip.clone(),
-        "server_port": config.port,
-        "password": config.uuid,
-        "tls": {
-            "enabled": true,
-            "server_name": if config.host.is_empty() { config.address.clone() } else { config.host.clone() },
-            "insecure": false
+    // On macOS, bind_interface forces sing-box to use the physical NIC for its
+    // own UDP connection to the VPN server, bypassing the TUN route created by
+    // auto_route (which would otherwise loop sing-box's own traffic back into
+    // the tunnel).
+    let mut proxy_outbound = {
+        let mut obj = serde_json::json!({
+            "type": "hysteria2",
+            "tag": "proxy",
+            "server": server_ip.clone(),
+            "server_port": config.port,
+            "password": config.uuid,
+            "tls": {
+                "enabled": true,
+                "server_name": if config.host.is_empty() { config.address.clone() } else { config.host.clone() },
+                "insecure": false
+            }
+        });
+        if let Some(ref iface) = physical_iface {
+            obj["bind_interface"] = serde_json::json!(iface);
         }
-    });
+        obj
+    };
     if let Some(up) = config.up_mbps {
         proxy_outbound["up_mbps"] = serde_json::json!(up);
     }
@@ -758,6 +963,9 @@ pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
             });
         }
     }
+    if let Some(timeout) = udp_timeout {
+        proxy_outbound["udp_timeout"] = serde_json::json!(format!("{}s", timeout));
+    }
 
     let singbox_config = serde_json::json!({
         "log": {
@@ -766,11 +974,20 @@ pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
         },
         "dns": {
             "servers": [
-                {
-                    "tag": "remote",
-                    "type": "tls",
-                    "server": "1.1.1.1",
-                    "detour": "proxy"
+                if plain_dns {
+                    serde_json::json!({
+                        "tag": "remote",
+                        "type": "udp",
+                        "server": "1.1.1.1",
+                        "detour": "proxy"
+                    })
+                } else {
+                    serde_json::json!({
+                        "tag": "remote",
+                        "type": "tls",
+                        "server": "1.1.1.1",
+                        "detour": "proxy"
+                    })
                 },
                 {
                     "tag": "local",
@@ -786,14 +1003,16 @@ pub fn generate_singbox_config(config: VlessConfig) -> Result<String, String> {
             {
                 "type": "tun",
                 "tag": "tun-in",
-                "interface_name": "zen-tun",
+                "interface_name": if cfg!(target_os = "macos") { "utun99" } else { "zen-tun" },
                 "address": [inet4_address],
-                "mtu": 1400,
+                "mtu": mtu,
                 "auto_route": true,
                 "strict_route": strict_route,
                 "stack": stack,
-                "sniff": true,
-                "sniff_override_destination": false
+                "sniff": sniff,
+                "sniff_override_destination": false,
+                "udp_timeout": if let Some(t) = udp_timeout { format!("{}s", t) } else { "5m0s".to_string() },
+                "endpoint_independent_nat": endpoint_independent_nat
             }
         ],
         "outbounds": [
@@ -849,7 +1068,12 @@ pub fn spawn_log_reader(log_buffer: CircularLogBuffer) {
 fn clear_log_file() -> Result<(), String> {
     let log_path = get_log_path();
     if log_path.exists() {
-        fs::write(&log_path, "").map_err(|e| format!("Failed to clear log file: {}", e))?;
+        // Log file may be owned by root (created via osascript with admin privileges).
+        // Try to remove and recreate it instead of truncating.
+        if fs::write(&log_path, "").is_err() {
+            let _ = fs::remove_file(&log_path);
+            let _ = fs::File::create(&log_path);
+        }
     }
     Ok(())
 }
@@ -868,7 +1092,7 @@ fn auto_enable_killswitch(server_address: &str, app_handle: &AppHandle) {
         Ok(backend) => {
             let config = super::KillSwitchConfig {
                 server_ip: server_ip.clone(),
-                tun_interface: "zen-tun".to_string(),
+                tun_interface: if cfg!(target_os = "macos") { "utun99".to_string() } else { "zen-tun".to_string() },
                 singbox_path: get_singbox_binary_path(),
             };
 
@@ -1107,16 +1331,61 @@ pub async fn start_singbox(
     }
 
     let log_path = get_log_path();
-    // On macOS, use osascript for privilege elevation; on Linux, use pkexec
+
     #[cfg(target_os = "macos")]
     let cmd = {
-        let inner_cmd = format!(
-            "{} run -c {} > {} 2>&1",
-            singbox_path.to_string_lossy(),
-            config_path.to_string_lossy(),
-            log_path.to_string_lossy()
+        // Generate pf kill switch config
+        let pf_conf_path = get_config_dir().join("pf-killswitch.conf");
+        let server_ip = resolve_server_ip(&config.address);
+        let skip_killswitch = config.diag_no_killswitch.unwrap_or(false);
+        if !skip_killswitch {
+            let tun_iface = "utun99";
+            let pf_rules = format!(
+                "pass quick on lo0 all\n\
+                 pass quick on {tun} all\n\
+                 pass out quick on ! {tun} proto {{ tcp, udp }} from any to {ip} no state\n\
+                 pass in quick on ! {tun} proto {{ tcp, udp }} from {ip} to any no state\n\
+                 pass out quick proto udp from any to any port 67\n\
+                 pass in quick proto udp from any port 67 to any\n\
+                 pass out quick proto {{ tcp, udp }} from any to 1.1.1.1 port 53\n\
+                 pass out quick proto {{ tcp, udp }} from any to 8.8.8.8 port 53\n\
+                 block drop out all\n\
+                 block drop in all\n",
+                tun = tun_iface, ip = server_ip
+            );
+            let _ = fs::write(&pf_conf_path, &pf_rules);
+        }
+
+        // Generate launcher script (routes + pfctl + exec sing-box)
+        let launcher_path = get_launcher_script_path();
+        let launcher_script = generate_launcher_script(
+            &config.address,
+            &singbox_path,
+            &config_path,
+            &pf_conf_path,
+            skip_killswitch,
         );
-        let escaped = inner_cmd.replace('\\', "\\\\").replace('"', "\\\"");
+        fs::write(&launcher_path, &launcher_script)
+            .map_err(|e| format!("Failed to write launcher script: {}", e))?;
+
+        // Generate launchd plist
+        let plist_staging = get_launchd_plist_path();
+        let plist_content = generate_launchd_plist(&launcher_path, &log_path);
+        fs::write(&plist_staging, &plist_content)
+            .map_err(|e| format!("Failed to write launchd plist: {}", e))?;
+
+        // Single osascript: unload any old daemon, install plist, bootstrap
+        let inner_cmd = format!(
+            "launchctl bootout system/{label} 2>/dev/null; \
+             cp '{staging}' '{install}' && \
+             chmod +x '{launcher}' && \
+             launchctl bootstrap system '{install}'",
+            label = LAUNCHD_LABEL,
+            staging = plist_staging.to_string_lossy(),
+            install = LAUNCHD_PLIST_INSTALL_PATH,
+            launcher = launcher_path.to_string_lossy(),
+        );
+        let escaped = inner_cmd.replace('\\', "\\\\").replace('"', "\\\"").replace('\'', "'\\''");
         format!(
             "osascript -e 'do shell script \"{}\" with administrator privileges'",
             escaped
@@ -1125,7 +1394,7 @@ pub async fn start_singbox(
 
     #[cfg(not(target_os = "macos"))]
     let cmd = format!(
-        "pkexec {} run -c {} > {} 2>&1",
+        "pkexec '{}' run -c '{}' > '{}' 2>&1",
         singbox_path.to_string_lossy(),
         config_path.to_string_lossy(),
         log_path.to_string_lossy()
@@ -1146,74 +1415,184 @@ pub async fn start_singbox(
             format!("Failed to start sing-box: {}", e)
         })?;
 
-    for _ in 0..300 {
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    // On macOS, osascript launches the wrapper in the background and exits quickly.
+    // We wait for osascript to finish, then poll for sing-box to start.
+    // On Linux, the child IS the sing-box process (via pkexec).
+    #[cfg(target_os = "macos")]
+    {
+        // Wait for osascript to complete (should be fast — it backgrounds the wrapper)
+        let output = child.wait_with_output().await.map_err(|e| {
+            let msg = format!("Failed waiting for osascript: {}", e);
+            state.log(LogLevel::Error, msg.clone());
+            msg
+        })?;
 
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    state.log(LogLevel::Error, "Authentication cancelled or failed".to_string());
-                    emit_vpn_event(&app_handle, VpnEvent::error("Authentication cancelled or failed", Some("AUTH_FAILED".to_string())));
-                    return Err("Authentication cancelled or failed".to_string());
-                }
-                state.log(LogLevel::Error, "sing-box exited unexpectedly".to_string());
-                emit_vpn_event(&app_handle, VpnEvent::error("sing-box exited unexpectedly", Some("UNEXPECTED_EXIT".to_string())));
-                return Err("sing-box exited unexpectedly".to_string());
-            }
-            Ok(None) => {
-                let output = std::process::Command::new("pgrep")
-                    .arg("-x")
-                    .arg("sing-box")
-                    .output();
+        if !output.status.success() {
+            let stderr_str = String::from_utf8_lossy(&output.stderr);
+            let stdout_str = String::from_utf8_lossy(&output.stdout);
+            let detail = if !stderr_str.trim().is_empty() {
+                stderr_str.trim().to_string()
+            } else if !stdout_str.trim().is_empty() {
+                stdout_str.trim().to_string()
+            } else {
+                format!("exit code: {}", output.status)
+            };
+            let msg = if detail.contains("User canceled") || detail.contains("(-128)") {
+                "Authentication cancelled by user".to_string()
+            } else {
+                format!("Authentication failed: {}", detail)
+            };
+            state.log(LogLevel::Error, msg.clone());
+            emit_vpn_event(&app_handle, VpnEvent::error(&msg, Some("AUTH_FAILED".to_string())));
+            vpn_manager.set_state(ConnectionState::Failed);
+            return Err(msg);
+        }
 
-                if let Ok(out) = output {
-                    if out.status.success() {
-                        let mut process = state.singbox_process.lock().unwrap();
-                        *process = Some(child);
-                        state.log(LogLevel::Info, format!("VPN connected to {}", config.address));
-                        emit_vpn_event(&app_handle, VpnEvent::connected(config.name.clone(), config.address.clone()));
+        // osascript succeeded — wrapper is running in background.
+        // Poll for sing-box to appear (wrapper starts it).
+        for _ in 0..300 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-                        // Auto-enable kill switch (Linux/macOS use real firewall rules)
-                        auto_enable_killswitch(&config.address, &app_handle);
+            let output = std::process::Command::new("pgrep")
+                .arg("-x")
+                .arg("sing-box")
+                .output();
+
+            if let Ok(out) = output {
+                if out.status.success() {
+                    state.log(LogLevel::Info, format!("VPN connected to {}", config.address));
+                    emit_vpn_event(&app_handle, VpnEvent::connected(config.name.clone(), config.address.clone()));
+
+                    if !config.diag_no_killswitch.unwrap_or(false) {
+                        emit_vpn_event(&app_handle, VpnEvent::killswitch_changed(true));
                         state.log(LogLevel::Info, "Kill switch auto-enabled".to_string());
-
-                        // Update VpnManager state and start health monitor for auto-reconnect
-                        vpn_manager.set_state(ConnectionState::Connected);
-
-                        // Create Arc wrapper for AppState to share with health monitor
-                        // Note: We use a new Arc since State<'_, T> doesn't impl Clone for Arc<T>
-                        let state_arc = Arc::new(AppState {
-                            singbox_process: Mutex::new(None), // Monitor doesn't need process handle
-                            log_buffer: state.log_buffer.clone(),
-                            health_monitor: Mutex::new(None),
-                            current_config: Mutex::new(state.get_config()),
-                        });
-
-                        let monitor = spawn_auto_reconnect_monitor(
-                            state_arc,
-                            Arc::clone(&vpn_manager),
-                            app_handle.clone(),
-                        );
-                        state.set_health_monitor(Some(monitor));
-
-                        return Ok(());
+                    } else {
+                        state.log(LogLevel::Info, "Kill switch skipped (diag_no_killswitch)".to_string());
                     }
+
+                    vpn_manager.set_state(ConnectionState::Connected);
+
+                    let state_arc = Arc::new(AppState {
+                        singbox_process: Mutex::new(None),
+                        log_buffer: state.log_buffer.clone(),
+                        health_monitor: Mutex::new(None),
+                        current_config: Mutex::new(state.get_config()),
+                    });
+
+                    let monitor = spawn_auto_reconnect_monitor(
+                        state_arc,
+                        Arc::clone(&vpn_manager),
+                        app_handle.clone(),
+                    );
+                    state.set_health_monitor(Some(monitor));
+
+                    return Ok(());
                 }
             }
-            Err(e) => {
-                state.log(LogLevel::Error, format!("Failed to check process status: {}", e));
-                emit_vpn_event(&app_handle, VpnEvent::error(format!("Failed to check process status: {}", e), Some("STATUS_CHECK_FAILED".to_string())));
+
+            // Check if launchd job died early (e.g. sing-box binary missing)
+            if !is_launchd_job_loaded() {
+                let msg = "LaunchDaemon exited unexpectedly — check sing-box installation".to_string();
+                state.log(LogLevel::Error, msg.clone());
+                emit_vpn_event(&app_handle, VpnEvent::error(&msg, Some("DAEMON_DIED".to_string())));
                 vpn_manager.set_state(ConnectionState::Failed);
-                return Err(format!("Failed to check process status: {}", e));
+                return Err(msg);
             }
         }
+
+        state.log(LogLevel::Error, "Connection timeout".to_string());
+        emit_vpn_event(&app_handle, VpnEvent::error("Connection timeout", Some("TIMEOUT".to_string())));
+        vpn_manager.set_state(ConnectionState::Failed);
+        Err("Connection timeout".to_string())
     }
 
-    let _ = child.kill().await;
-    state.log(LogLevel::Error, "Connection timeout".to_string());
-    emit_vpn_event(&app_handle, VpnEvent::error("Connection timeout", Some("TIMEOUT".to_string())));
-    vpn_manager.set_state(ConnectionState::Failed);
-    Err("Connection timeout".to_string())
+    #[cfg(not(target_os = "macos"))]
+    {
+        for _ in 0..300 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let detail = match child.wait_with_output().await {
+                        Ok(output) => {
+                            let stderr_str = String::from_utf8_lossy(&output.stderr);
+                            let stdout_str = String::from_utf8_lossy(&output.stdout);
+                            if !stderr_str.trim().is_empty() {
+                                stderr_str.trim().to_string()
+                            } else if !stdout_str.trim().is_empty() {
+                                stdout_str.trim().to_string()
+                            } else {
+                                format!("exit code: {}", status)
+                            }
+                        }
+                        Err(_) => format!("exit code: {}", status),
+                    };
+                    if !status.success() {
+                        let msg = format!("Authentication or launch failed: {}", detail);
+                        state.log(LogLevel::Error, msg.clone());
+                        emit_vpn_event(&app_handle, VpnEvent::error(&msg, Some("AUTH_FAILED".to_string())));
+                        return Err(msg);
+                    }
+                    let msg = format!("sing-box exited unexpectedly: {}", detail);
+                    state.log(LogLevel::Error, msg.clone());
+                    emit_vpn_event(&app_handle, VpnEvent::error(&msg, Some("UNEXPECTED_EXIT".to_string())));
+                    return Err(msg);
+                }
+                Ok(None) => {
+                    let output = std::process::Command::new("pgrep")
+                        .arg("-x")
+                        .arg("sing-box")
+                        .output();
+
+                    if let Ok(out) = output {
+                        if out.status.success() {
+                            let mut process = state.singbox_process.lock().unwrap();
+                            *process = Some(child);
+                            state.log(LogLevel::Info, format!("VPN connected to {}", config.address));
+                            emit_vpn_event(&app_handle, VpnEvent::connected(config.name.clone(), config.address.clone()));
+
+                            if !config.diag_no_killswitch.unwrap_or(false) {
+                                auto_enable_killswitch(&config.address, &app_handle);
+                                state.log(LogLevel::Info, "Kill switch auto-enabled".to_string());
+                            } else {
+                                state.log(LogLevel::Info, "Kill switch skipped (diag_no_killswitch)".to_string());
+                            }
+
+                            vpn_manager.set_state(ConnectionState::Connected);
+
+                            let state_arc = Arc::new(AppState {
+                                singbox_process: Mutex::new(None),
+                                log_buffer: state.log_buffer.clone(),
+                                health_monitor: Mutex::new(None),
+                                current_config: Mutex::new(state.get_config()),
+                            });
+
+                            let monitor = spawn_auto_reconnect_monitor(
+                                state_arc,
+                                Arc::clone(&vpn_manager),
+                                app_handle.clone(),
+                            );
+                            state.set_health_monitor(Some(monitor));
+
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(e) => {
+                    state.log(LogLevel::Error, format!("Failed to check process status: {}", e));
+                    emit_vpn_event(&app_handle, VpnEvent::error(format!("Failed to check process status: {}", e), Some("STATUS_CHECK_FAILED".to_string())));
+                    vpn_manager.set_state(ConnectionState::Failed);
+                    return Err(format!("Failed to check process status: {}", e));
+                }
+            }
+        }
+
+        let _ = child.kill().await;
+        state.log(LogLevel::Error, "Connection timeout".to_string());
+        emit_vpn_event(&app_handle, VpnEvent::error("Connection timeout", Some("TIMEOUT".to_string())));
+        vpn_manager.set_state(ConnectionState::Failed);
+        Err("Connection timeout".to_string())
+    }
 }
 
 /// Stop the sing-box process on Windows with graceful shutdown
@@ -1302,12 +1681,54 @@ pub async fn stop_singbox(
         process.take()
     };
 
-    // Perform graceful shutdown with SIGTERM -> 5s wait -> SIGKILL sequence
-    graceful_kill_external_process().await?;
+    // Perform graceful shutdown and cleanup
+    #[cfg(target_os = "macos")]
+    {
+        // Single elevated command: bootout daemon + cleanup pfctl + routes + plist
+        let server_ip = state.get_config()
+            .map(|c| resolve_server_ip(&c.address))
+            .unwrap_or_default();
 
-    // Clean up firewall rules (kill switch)
-    if let Err(e) = cleanup_firewall() {
-        state.log(LogLevel::Warn, format!("Failed to cleanup firewall: {}", e));
+        let bootout_cmd = format!(
+            "launchctl bootout system/{label} 2>/dev/null; \
+             pfctl -a 'com.zen.vpn' -F all 2>/dev/null; \
+             route delete -host '{server}' 2>/dev/null; \
+             rm -f '{plist}'; \
+             true",
+            label = LAUNCHD_LABEL,
+            server = server_ip,
+            plist = LAUNCHD_PLIST_INSTALL_PATH,
+        );
+        if let Err(e) = elevated_command(&bootout_cmd) {
+            state.log(LogLevel::Warn, format!("LaunchDaemon bootout failed: {}", e));
+        }
+
+        // Wait for sing-box to disappear
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let check = std::process::Command::new("pgrep")
+                .arg("-x").arg("sing-box").output();
+            if let Ok(out) = check {
+                if !out.status.success() { break; }
+            }
+        }
+
+        // Clean up local state files
+        let config_dir = get_config_dir();
+        let _ = std::fs::remove_file(config_dir.join("pf-killswitch.conf"));
+        let _ = std::fs::remove_file(config_dir.join("killswitch.state"));
+        let _ = std::fs::remove_file(config_dir.join("com.zen.vpn.plist"));
+        let _ = std::fs::remove_file(config_dir.join("zen-vpn-launcher.sh"));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        // On Linux: separate calls are fine (pkexec caches credentials)
+        graceful_kill_external_process().await?;
+
+        if let Err(e) = cleanup_firewall() {
+            state.log(LogLevel::Warn, format!("Failed to cleanup firewall: {}", e));
+        }
     }
 
     // Restore DNS settings
@@ -1375,6 +1796,8 @@ pub enum ProcessHealthStatus {
     Exited(Option<i32>),
     /// Process handle is not available (never started or already cleaned up)
     NotRunning,
+    /// Process is being restarted by the wrapper (macOS only)
+    Restarting,
     /// Error checking process status
     Error(String),
 }
@@ -1442,6 +1865,12 @@ pub fn check_process_health(_state: &AppState) -> ProcessHealthStatus {
                 if out.status.success() {
                     ProcessHealthStatus::Running
                 } else {
+                    // On macOS, check if the launchd job is still loaded — it may be
+                    // restarting sing-box automatically (brief gap between restarts)
+                    #[cfg(target_os = "macos")]
+                    if is_launchd_job_loaded() {
+                        return ProcessHealthStatus::Restarting;
+                    }
                     ProcessHealthStatus::NotRunning
                 }
             }
@@ -1751,7 +2180,34 @@ fn restore_dns() -> Result<(), String> {
 
     #[cfg(target_os = "macos")]
     {
-        // Flush macOS DNS cache
+        // Restore DNS from backup file (created by launcher script)
+        let backup_path = get_config_dir().join("dns-backup.txt");
+        if backup_path.exists() {
+            if let Ok(content) = fs::read_to_string(&backup_path) {
+                for line in content.lines() {
+                    if let Some((svc, dns)) = line.split_once('=') {
+                        if dns == "empty" {
+                            // Restore to "no DNS set" (DHCP default)
+                            let _ = std::process::Command::new("networksetup")
+                                .args(["-setdnsservers", svc, "empty"])
+                                .output();
+                        } else {
+                            let servers: Vec<&str> = dns.split(',').filter(|s| !s.is_empty()).collect();
+                            if !servers.is_empty() {
+                                let mut args = vec!["-setdnsservers", svc];
+                                args.extend(servers);
+                                let _ = std::process::Command::new("networksetup")
+                                    .args(&args)
+                                    .output();
+                            }
+                        }
+                    }
+                }
+            }
+            let _ = fs::remove_file(&backup_path);
+        }
+
+        // Flush DNS cache
         let _ = std::process::Command::new("dscacheutil")
             .arg("-flushcache")
             .output();
@@ -1823,13 +2279,48 @@ pub fn graceful_shutdown_sync() {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     {
-        // First try SIGTERM
+        // Bootout the launchd daemon — it sends SIGTERM to sing-box and cleans up
+        let bootout_cmd = format!(
+            "launchctl bootout system/{label} 2>/dev/null; \
+             pfctl -a 'com.zen.vpn' -F all 2>/dev/null; \
+             rm -f '{plist}'; \
+             true",
+            label = LAUNCHD_LABEL,
+            plist = LAUNCHD_PLIST_INSTALL_PATH,
+        );
+        let _ = elevated_command(&bootout_cmd);
+
+        // Wait for sing-box to disappear
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let check = std::process::Command::new("pgrep")
+                .arg("-x").arg("sing-box").output();
+            if let Ok(out) = check {
+                if !out.status.success() { break; }
+            }
+        }
+
+        // Force kill if still alive
+        let check = std::process::Command::new("pgrep").arg("-x").arg("sing-box").output();
+        if check.map(|o| o.status.success()).unwrap_or(false) {
+            let _ = elevated_command("killall -KILL sing-box 2>/dev/null; true");
+        }
+
+        let config_dir = get_config_dir();
+        let _ = std::fs::remove_file(config_dir.join("pf-killswitch.conf"));
+        let _ = std::fs::remove_file(config_dir.join("killswitch.state"));
+        let _ = std::fs::remove_file(config_dir.join("com.zen.vpn.plist"));
+        let _ = std::fs::remove_file(config_dir.join("zen-vpn-launcher.sh"));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // On Linux: pkexec caches credentials, separate calls are fine
         let sigterm_result = elevated_command("killall -TERM sing-box");
 
         if sigterm_result.is_ok() {
-            // Wait for process to exit gracefully (blocking)
             for _ in 0..(GRACEFUL_SHUTDOWN_TIMEOUT_SECS * 10) {
                 std::thread::sleep(std::time::Duration::from_millis(100));
 
@@ -1840,7 +2331,6 @@ pub fn graceful_shutdown_sync() {
 
                 if let Ok(out) = check {
                     if !out.status.success() {
-                        // Process exited gracefully
                         let _ = cleanup_firewall();
                         let _ = restore_dns();
                         return;
@@ -1849,12 +2339,10 @@ pub fn graceful_shutdown_sync() {
             }
         }
 
-        // Force kill (SIGKILL) if still running
         let _ = elevated_command("killall -KILL sing-box");
+        let _ = cleanup_firewall();
     }
 
-    // Cleanup firewall and DNS
-    let _ = cleanup_firewall();
     let _ = restore_dns();
 }
 
@@ -2002,6 +2490,13 @@ mod tests {
             down_mbps: None,
             obfs: None,
             obfs_password: None,
+            diag_mtu: None,
+            diag_sniff: None,
+            diag_stack: None,
+            diag_plain_dns: None,
+            diag_udp_timeout: None,
+            diag_no_killswitch: None,
+            diag_endpoint_independent_nat: None,
         }
     }
 
@@ -2099,7 +2594,8 @@ mod tests {
         let inbound = &v["inbounds"][0];
         assert_eq!(inbound["type"], "tun");
         assert_eq!(inbound["tag"], "tun-in");
-        assert_eq!(inbound["interface_name"], "zen-tun");
+        let expected_iface = if cfg!(target_os = "macos") { "utun99" } else { "zen-tun" };
+        assert_eq!(inbound["interface_name"], expected_iface);
         assert_eq!(inbound["sniff"], true);
     }
 
@@ -2175,6 +2671,7 @@ mod tests {
         assert_eq!(dns_rule.unwrap()["protocol"], "dns");
         assert_eq!(dns_rule.unwrap()["action"], "hijack-dns");
     }
+
 
     #[test]
     fn test_gen_serde_validity() {
@@ -2252,6 +2749,13 @@ mod tests {
             down_mbps: Some(100),
             obfs: Some("salamander".to_string()),
             obfs_password: Some("pwd".to_string()),
+            diag_mtu: None,
+            diag_sniff: None,
+            diag_stack: None,
+            diag_plain_dns: None,
+            diag_udp_timeout: None,
+            diag_no_killswitch: None,
+            diag_endpoint_independent_nat: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: VlessConfig = serde_json::from_str(&json).unwrap();

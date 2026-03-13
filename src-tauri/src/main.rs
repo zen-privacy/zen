@@ -417,6 +417,13 @@ fn parse_hysteria2_link(link: String) -> Result<VlessConfig, String> {
         down_mbps: None,
         obfs,
         obfs_password,
+        diag_mtu: None,
+        diag_sniff: None,
+        diag_stack: None,
+        diag_plain_dns: None,
+        diag_udp_timeout: None,
+        diag_no_killswitch: None,
+        diag_endpoint_independent_nat: None,
     })
 }
 
@@ -590,6 +597,13 @@ fn import_config_json(json_content: String) -> Result<VlessConfig, String> {
         down_mbps: outbound.down_mbps,
         obfs,
         obfs_password,
+        diag_mtu: None,
+        diag_sniff: None,
+        diag_stack: None,
+        diag_plain_dns: None,
+        diag_udp_timeout: None,
+        diag_no_killswitch: None,
+        diag_endpoint_independent_nat: None,
     })
 }
 
@@ -846,26 +860,23 @@ async fn get_traffic_stats() -> Result<TrafficStats, String> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // Find the zen-tun or utun interface line
+    // Find utun99 (our sing-box TUN interface) in Link-level entries
     // netstat -ib columns: Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes
     for line in stdout.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() {
+        if parts.len() < 10 {
             continue;
         }
-        // sing-box creates utun interfaces on macOS
-        let iface = parts[0];
-        if iface.starts_with("utun") && parts.len() >= 10 {
-            // Check if this is a Link-level entry (has Ibytes/Obytes)
+        // Match exactly utun99 with Link-level address (<Link#N>)
+        if parts[0] == "utun99" && parts[2].starts_with("<Link") {
             if let (Ok(rx), Ok(tx)) = (parts[6].parse::<u64>(), parts[9].parse::<u64>()) {
-                if rx > 0 || tx > 0 {
-                    return Ok(TrafficStats { rx_bytes: rx, tx_bytes: tx });
-                }
+                return Ok(TrafficStats { rx_bytes: rx, tx_bytes: tx });
             }
         }
     }
 
-    Err("Interface not found".to_string())
+    // Interface not up yet — return zeros instead of error
+    Ok(TrafficStats { rx_bytes: 0, tx_bytes: 0 })
 }
 
 /// Response structure for get_logs command
@@ -1056,15 +1067,16 @@ fn get_killswitch_status() -> KillSwitchStatus {
         };
         let enabled = vpn::state_file_exists();
 
+        let message = if enabled {
+            format!("Kill switch active ({})", backend)
+        } else {
+            format!("Kill switch ready ({})", backend)
+        };
         KillSwitchStatus {
             enabled,
             available,
             backend,
-            message: if enabled {
-                format!("Kill switch active ({})", backend)
-            } else {
-                format!("Kill switch ready ({})", backend)
-            },
+            message,
         }
     }
 }

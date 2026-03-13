@@ -29,6 +29,14 @@ interface VlessConfig {
   down_mbps?: number
   obfs?: string
   obfs_password?: string
+  // Diagnostic flags for bisecting real-time UDP issues (e.g. Telegram calls)
+  diag_mtu?: number
+  diag_sniff?: boolean
+  diag_stack?: string
+  diag_plain_dns?: boolean
+  diag_udp_timeout?: number
+  diag_no_killswitch?: boolean
+  diag_endpoint_independent_nat?: boolean
 }
 
 interface RuleSetInfo {
@@ -162,7 +170,7 @@ function App() {
     }
   }
 
-  const handleUpdateConfig = async (key: keyof VlessConfig, value: any) => {
+  const handleUpdateConfig = async (key: string, value: any) => {
     if (!invoke || !currentProfile) return
     const updatedConfig = { ...currentProfile.config, [key]: value }
     const updatedProfile = { ...currentProfile, config: updatedConfig }

@@ -981,6 +981,10 @@ impl HealthMonitor {
                     super::process::ProcessHealthStatus::NotRunning => {
                         HealthCheckResult::process_not_running(None)
                     }
+                    super::process::ProcessHealthStatus::Restarting => {
+                        // Wrapper is handling restart, treat as healthy (temporary gap)
+                        HealthCheckResult::healthy(None)
+                    }
                     super::process::ProcessHealthStatus::Error(e) => {
                         HealthCheckResult::error(e)
                     }
@@ -1058,6 +1062,9 @@ impl HealthMonitor {
             }
             super::process::ProcessHealthStatus::NotRunning => {
                 HealthCheckResult::process_not_running(None)
+            }
+            super::process::ProcessHealthStatus::Restarting => {
+                HealthCheckResult::healthy(None)
             }
             super::process::ProcessHealthStatus::Error(e) => {
                 HealthCheckResult::error(e)
@@ -1202,6 +1209,13 @@ mod tests {
             down_mbps: None,
             obfs: None,
             obfs_password: None,
+            diag_mtu: None,
+            diag_sniff: None,
+            diag_stack: None,
+            diag_plain_dns: None,
+            diag_udp_timeout: None,
+            diag_no_killswitch: None,
+            diag_endpoint_independent_nat: None,
         };
 
         manager.store_config(config.clone());
@@ -1346,6 +1360,13 @@ mod tests {
             down_mbps: None,
             obfs: None,
             obfs_password: None,
+            diag_mtu: None,
+            diag_sniff: None,
+            diag_stack: None,
+            diag_plain_dns: None,
+            diag_udp_timeout: None,
+            diag_no_killswitch: None,
+            diag_endpoint_independent_nat: None,
         });
 
         // Prepare disconnect
