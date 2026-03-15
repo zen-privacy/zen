@@ -116,12 +116,22 @@ body {
   min-height: 0;
 }
 
+.main-content.two-columns {
+  grid-template-columns: 1fr 300px;
+}
+
 /* Left Panel - Servers */
 .servers-panel {
   display: flex;
   flex-direction: column;
   gap: 12px;
   min-height: 0;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .panel-title {
@@ -133,6 +143,53 @@ body {
   padding: 8px 0;
   border-bottom: 2px solid var(--red-primary);
   margin-bottom: 4px;
+  flex: 1;
+}
+
+.btn-disconnect {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 2px solid var(--red-primary);
+  background: rgba(196,30,58,0.2);
+  color: var(--red-primary);
+  font-size: 1.2rem;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 12px;
+  flex-shrink: 0;
+}
+
+.btn-disconnect:hover {
+  background: var(--red-primary);
+  color: white;
+}
+
+.btn-disconnect:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.connection-status-bar {
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  text-align: center;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.connection-status-bar.connecting {
+  background: rgba(255,165,0,0.15);
+  color: orange;
+}
+
+.connection-status-bar.disconnecting {
+  background: rgba(196,30,58,0.15);
+  color: var(--red-primary);
 }
 
 .servers-list {
@@ -156,13 +213,16 @@ body {
 
 .server-card {
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   background: linear-gradient(135deg, rgba(139,0,0,0.9) 0%, rgba(100,0,0,0.95) 100%);
   border: none;
   border-radius: 2px;
   padding: 14px 16px;
   cursor: pointer;
   transition: all 0.2s;
-  box-shadow: 
+  box-shadow:
     3px 3px 0 var(--border-torn),
     inset 0 0 20px rgba(0,0,0,0.3);
   clip-path: polygon(0 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%);
@@ -187,69 +247,43 @@ body {
 
 .server-card.selected {
   background: linear-gradient(135deg, rgba(196,30,58,0.95) 0%, rgba(139,0,0,0.95) 100%);
-  box-shadow: 
+  box-shadow:
     5px 5px 0 var(--border-torn),
     0 0 20px rgba(196,30,58,0.4),
     inset 0 0 20px rgba(0,0,0,0.2);
 }
 
+.server-card.active {
+  border-left: 3px solid #4caf50;
+}
+
+.server-card .server-info {
+  flex: 1;
+}
+
+.server-active-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #4caf50;
+  box-shadow: 0 0 8px rgba(76,175,80,0.6);
+  flex-shrink: 0;
+}
+
 .server-name {
   font-family: 'Bebas Neue', sans-serif;
-  font-size: 1.3rem;
+  font-size: 1.1rem;
   letter-spacing: 2px;
   color: var(--text-light);
   text-transform: uppercase;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.protocol-badge {
-  font-size: 0.6rem;
-  padding: 2px 6px;
-  border-radius: 3px;
-  letter-spacing: 1px;
-  font-weight: bold;
-}
-
-.protocol-badge.hy2 {
-  background: rgba(0,180,255,0.25);
-  color: rgba(100,200,255,0.9);
 }
 
 .server-address {
   font-size: 0.75rem;
   color: rgba(255,255,255,0.6);
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
-.server-delete {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  width: 24px;
-  height: 24px;
-  background: rgba(0,0,0,0.4);
-  border: none;
-  border-radius: 50%;
-  color: rgba(255,255,255,0.6);
-  font-size: 14px;
-  cursor: pointer;
-  opacity: 0;
-  transition: all 0.2s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.server-card:hover .server-delete {
-  opacity: 1;
-}
-
-.server-delete:hover {
-  background: rgba(0,0,0,0.6);
-  color: white;
-}
 
 /* Add Server Input */
 .add-server {
@@ -1161,5 +1195,72 @@ body {
 
 .btn-close:hover {
   opacity: 1;
+}
+
+/* Sudo password dialog */
+.sudo-dialog {
+  background: var(--bg-secondary, #1a1a2e);
+  border-radius: 12px;
+  padding: 24px;
+  max-width: 380px;
+  width: 90%;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1001;
+}
+
+.sudo-dialog h3 {
+  margin: 0 0 8px 0;
+  font-size: 1.1rem;
+  color: var(--text-primary, #fff);
+}
+
+.sudo-dialog p {
+  margin: 0 0 16px 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary, #999);
+  line-height: 1.4;
+}
+
+.sudo-dialog input[type="password"] {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(0,0,0,0.3);
+  color: #fff;
+  font-size: 0.95rem;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.sudo-dialog input[type="password"]:focus {
+  border-color: var(--red-primary, #e74c3c);
+}
+
+.sudo-dialog-buttons {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.sudo-dialog-buttons .btn-add {
+  flex: 1;
+}
+
+.btn-cancel {
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.15);
+  background: transparent;
+  color: var(--text-secondary, #999);
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.btn-cancel:hover {
+  background: rgba(255,255,255,0.05);
 }
 

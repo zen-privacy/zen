@@ -2,6 +2,8 @@
 
 mod logging;
 mod notifications;
+mod storage;
+mod sudo;
 mod vpn;
 mod updates;
 
@@ -19,7 +21,7 @@ use logging::{LogEntry, LogFilterState, LogLevel};
 use vpn::{
     cleanup_killswitch, create_killswitch, create_vpn_manager, generate_singbox_config,
     get_available_rule_sets, get_connection_status, kill_singbox_sync, recover_killswitch, start_singbox,
-    stop_singbox, AppState, AppStatus, KillSwitchConfig, Profile, TrafficStats, VlessConfig,
+    stop_singbox, AppState, AppStatus, KillSwitchConfig, Profile, TrafficStats, ServerConfig,
 };
 use updates::{check_for_update, install_update};
 
@@ -335,7 +337,7 @@ fn extract_from_targz(_bytes: &[u8], _singbox_path: &PathBuf) -> Result<(), Stri
 }
 
 #[tauri::command]
-fn parse_hysteria2_link(link: String) -> Result<VlessConfig, String> {
+fn parse_hysteria2_link(link: String) -> Result<ServerConfig, String> {
     let without_prefix = link
         .strip_prefix("hysteria2://")
         .or_else(|| link.strip_prefix("hy2://"))
@@ -401,7 +403,7 @@ fn parse_hysteria2_link(link: String) -> Result<VlessConfig, String> {
     let obfs = params.get("obfs").cloned().filter(|s| !s.is_empty());
     let obfs_password = params.get("obfs-password").cloned().filter(|s| !s.is_empty());
 
-    Ok(VlessConfig {
+    Ok(ServerConfig {
         protocol: Some("hysteria2".to_string()),
         uuid: password, // reuse uuid field as password
         address: address.to_string(),
@@ -428,7 +430,7 @@ fn parse_hysteria2_link(link: String) -> Result<VlessConfig, String> {
 }
 
 #[tauri::command]
-async fn fetch_subscription(url: String) -> Result<Vec<VlessConfig>, String> {
+async fn fetch_subscription(url: String) -> Result<Vec<ServerConfig>, String> {
     use base64::Engine;
 
     let client = reqwest::Client::builder()
@@ -484,7 +486,7 @@ async fn fetch_subscription(url: String) -> Result<Vec<VlessConfig>, String> {
 }
 
 #[tauri::command]
-fn parse_share_link(link: String) -> Result<VlessConfig, String> {
+fn parse_share_link(link: String) -> Result<ServerConfig, String> {
     let trimmed = link.trim();
     if trimmed.starts_with("hysteria2://") || trimmed.starts_with("hy2://") {
         parse_hysteria2_link(trimmed.to_string())
@@ -546,7 +548,7 @@ struct SingboxConfig {
 }
 
 #[tauri::command]
-fn import_config_json(json_content: String) -> Result<VlessConfig, String> {
+fn import_config_json(json_content: String) -> Result<ServerConfig, String> {
     let supported_types = ["hysteria2"];
 
     // Try to parse as full config first
@@ -581,7 +583,7 @@ fn import_config_json(json_content: String) -> Result<VlessConfig, String> {
     let obfs = outbound.obfs.as_ref().and_then(|o| o.obfs_type.clone());
     let obfs_password = outbound.obfs.as_ref().and_then(|o| o.password.clone());
 
-    Ok(VlessConfig {
+    Ok(ServerConfig {
         protocol: Some("hysteria2".to_string()),
         uuid: password,
         address,
@@ -626,9 +628,7 @@ fn save_profile(profile: Profile) -> Result<(), String> {
         profiles.push(profile);
     }
 
-    let content = serde_json::to_string_pretty(&profiles).map_err(|e| e.to_string())?;
-    fs::write(profiles_path, content).map_err(|e| e.to_string())?;
-
+    storage::atomic_write_json(&profiles_path, &profiles)?;
     Ok(())
 }
 
@@ -654,10 +654,45 @@ fn delete_profile(id: String) -> Result<(), String> {
     let mut profiles: Vec<Profile> = serde_json::from_str(&content).unwrap_or_default();
     profiles.retain(|p| p.id != id);
 
-    let content = serde_json::to_string_pretty(&profiles).map_err(|e| e.to_string())?;
-    fs::write(profiles_path, content).map_err(|e| e.to_string())?;
-
+    storage::atomic_write_json(&profiles_path, &profiles)?;
     Ok(())
+}
+
+fn get_subscription_path() -> PathBuf {
+    get_config_dir().join("subscription.txt")
+}
+
+#[tauri::command]
+fn save_subscription_url(url: String) -> Result<(), String> {
+    storage::atomic_write_str(&get_subscription_path(), url.trim())
+}
+
+#[tauri::command]
+fn load_subscription_url() -> Result<String, String> {
+    let path = get_subscription_path();
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    fs::read_to_string(path).map_err(|e| e.to_string())
+}
+
+/// Fetch subscription and replace all profiles with the result
+#[tauri::command]
+async fn refresh_subscription() -> Result<Vec<ServerConfig>, String> {
+    let url = {
+        let path = get_subscription_path();
+        if !path.exists() {
+            return Err("No subscription URL saved".to_string());
+        }
+        fs::read_to_string(path).map_err(|e| e.to_string())?
+    };
+
+    if url.trim().is_empty() {
+        return Err("No subscription URL saved".to_string());
+    }
+
+    // Reuse existing fetch logic
+    fetch_subscription(url).await
 }
 
 #[cfg(target_os = "windows")]
@@ -1103,6 +1138,12 @@ fn main() {
             save_profile,
             load_profiles,
             delete_profile,
+            save_subscription_url,
+            load_subscription_url,
+            refresh_subscription,
+            sudo::sudo_has_password,
+            sudo::sudo_set_password,
+            sudo::sudo_clear_password,
             start_singbox,
             stop_singbox,
             get_traffic_stats,

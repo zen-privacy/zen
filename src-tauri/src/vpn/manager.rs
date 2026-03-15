@@ -49,7 +49,7 @@ use std::time::Duration;
 
 use backon::{ExponentialBuilder, Retryable};
 
-use super::VlessConfig;
+use super::ServerConfig;
 
 /// Default initial delay for reconnection (in milliseconds)
 const DEFAULT_INITIAL_DELAY_MS: u64 = 1000;
@@ -324,7 +324,7 @@ pub struct VpnManager {
     state: RwLock<ConnectionState>,
 
     /// Current VPN configuration (if any)
-    config: RwLock<Option<VlessConfig>>,
+    config: RwLock<Option<ServerConfig>>,
 
     /// Auto-reconnect configuration
     reconnect_config: RwLock<ReconnectConfig>,
@@ -410,18 +410,18 @@ impl VpnManager {
     // ==================== Configuration Management ====================
 
     /// Get the current VPN configuration
-    pub fn config(&self) -> Option<VlessConfig> {
+    pub fn config(&self) -> Option<ServerConfig> {
         self.config.read().unwrap().clone()
     }
 
     /// Set the current VPN configuration
-    pub fn set_config(&self, config: Option<VlessConfig>) {
+    pub fn set_config(&self, config: Option<ServerConfig>) {
         let mut cfg = self.config.write().unwrap();
         *cfg = config;
     }
 
     /// Store a new configuration for future connections
-    pub fn store_config(&self, config: VlessConfig) {
+    pub fn store_config(&self, config: ServerConfig) {
         self.set_config(Some(config));
     }
 
@@ -877,6 +877,11 @@ pub struct HealthMonitorHandle {
 }
 
 impl HealthMonitorHandle {
+    /// Create a new handle from a tokio AbortHandle
+    pub fn new(abort_handle: tokio::task::AbortHandle) -> Self {
+        Self { abort_handle }
+    }
+
     /// Stop the health monitor
     pub fn stop(self) {
         self.abort_handle.abort();
@@ -1193,7 +1198,7 @@ mod tests {
 
         assert!(manager.config().is_none());
 
-        let config = VlessConfig {
+        let config = ServerConfig {
             uuid: "test-uuid".to_string(),
             address: "test.example.com".to_string(),
             port: 443,
@@ -1344,7 +1349,7 @@ mod tests {
 
         // Set up connected state
         manager.set_state(ConnectionState::Connected);
-        manager.store_config(VlessConfig {
+        manager.store_config(ServerConfig {
             uuid: "test".to_string(),
             address: "test.com".to_string(),
             port: 443,

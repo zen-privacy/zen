@@ -354,27 +354,9 @@ impl LinuxKillSwitch {
             .map_err(|e| format!("Failed to execute command: {}", e))
     }
 
-    /// Execute a command with sudo/pkexec for privilege elevation
+    /// Execute a command with sudo using saved password
     fn run_privileged_command(&self, cmd: &str) -> Result<std::process::Output, String> {
-        // Try pkexec first (GUI-friendly), fall back to sudo
-        let pkexec_result = std::process::Command::new("pkexec")
-            .arg("sh")
-            .arg("-c")
-            .arg(cmd)
-            .output();
-
-        match pkexec_result {
-            Ok(output) => Ok(output),
-            Err(_) => {
-                // Fall back to sudo
-                std::process::Command::new("sudo")
-                    .arg("sh")
-                    .arg("-c")
-                    .arg(cmd)
-                    .output()
-                    .map_err(|e| format!("Failed to execute privileged command: {}", e))
-            }
-        }
+        crate::sudo::sudo_exec(&["sh", "-c", cmd])
     }
 
     /// Resolve a hostname to IP addresses

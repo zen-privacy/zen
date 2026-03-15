@@ -98,6 +98,11 @@ function App() {
   const [ruleSets, setRuleSets] = useState<RuleSetInfo[]>([])
   const [subUrl, setSubUrl] = useState('')
   const [isFetchingSub, setIsFetchingSub] = useState(false)
+  const [showSudoDialog, setShowSudoDialog] = useState(false)
+  const [sudoPassword, setSudoPassword] = useState('')
+  const [sudoSaving, setSudoSaving] = useState(false)
+  const [sudoError, setSudoError] = useState<string | null>(null)
+  const [pendingConnect, setPendingConnect] = useState(false)
 
   const invoke = window.__TAURI__?.core?.invoke
 
@@ -105,7 +110,7 @@ function App() {
     checkSetup()
     loadProfiles()
     loadRuleSets()
-    // Auto-check for updates on startup
+    loadSavedSubscription()
     handleCheckUpdate()
 
     const handleVisibility = () => setIsVisible(!document.hidden)
@@ -152,9 +157,6 @@ function App() {
     try {
       const loaded = await invoke<Profile[]>('load_profiles')
       setProfiles(loaded)
-      if (loaded.length > 0 && !selectedId) {
-        setSelectedId(loaded[0].id)
-      }
     } catch (e) {
       toast.error('Failed to load profiles', { description: String(e) })
     }
@@ -226,31 +228,69 @@ function App() {
     }
   }
 
+  const loadSavedSubscription = async () => {
+    if (!invoke) return
+    try {
+      const savedUrl = await invoke<string>('load_subscription_url')
+      if (savedUrl) {
+        setSubUrl(savedUrl)
+        // Auto-refresh subscription on startup
+        await refreshSubscription(savedUrl)
+      }
+    } catch {
+      // No saved subscription, that's fine
+    }
+  }
+
+  const refreshSubscription = async (url?: string) => {
+    if (!invoke) return
+    const subUrlToUse = url || subUrl.trim()
+    if (!subUrlToUse) return
+
+    try {
+      const configs = await invoke<VlessConfig[]>('fetch_subscription', { url: subUrlToUse })
+      const validConfigs = configs.filter(c => c.address && c.port && c.port > 0 && c.port <= 65535)
+
+      if (validConfigs.length === 0) return
+
+      // Delete all existing profiles and replace with subscription
+      const existingProfiles = await invoke<Profile[]>('load_profiles')
+      for (const p of existingProfiles) {
+        await invoke('delete_profile', { id: p.id })
+      }
+
+      // Add new profiles from subscription
+      let firstId: string | null = null
+      for (const config of validConfigs) {
+        const profile: Profile = {
+          id: crypto.randomUUID(),
+          name: config.name || `Server`,
+          config,
+        }
+        await invoke('save_profile', { profile })
+        if (!firstId) firstId = profile.id
+      }
+
+      await loadProfiles()
+      if (firstId && !isConnected) {
+        setSelectedId(firstId)
+      }
+    } catch {
+      // Silent fail on auto-refresh
+    }
+  }
+
   const handleFetchSubscription = async () => {
     if (!invoke || !subUrl.trim()) return
     setError(null)
     setIsFetchingSub(true)
 
     try {
-      const configs = await invoke<VlessConfig[]>('fetch_subscription', { url: subUrl.trim() })
-      let added = 0
-      for (const config of configs) {
-        if (!config.address || !config.port || config.port < 1 || config.port > 65535) continue
-        const profile: Profile = {
-          id: crypto.randomUUID(),
-          name: config.name || `Server ${added + 1}`,
-          config,
-        }
-        await invoke('save_profile', { profile })
-        added++
-      }
-      if (added > 0) {
-        await loadProfiles()
-        setSubUrl('')
-        toast.success(`Imported ${added} server${added > 1 ? 's' : ''} from subscription`)
-      } else {
-        setError('No valid profiles found in subscription')
-      }
+      // Save subscription URL for future auto-refresh
+      await invoke('save_subscription_url', { url: subUrl.trim() })
+
+      await refreshSubscription()
+      toast.success('Subscription updated')
     } catch (e) {
       setError(String(e))
     } finally {
@@ -311,30 +351,73 @@ function App() {
     }
   }
 
+  const handleSudoSubmit = async () => {
+    if (!invoke || !sudoPassword.trim()) return
+    setSudoSaving(true)
+    setSudoError(null)
+
+    try {
+      await invoke('sudo_set_password', { password: sudoPassword })
+      setSudoPassword('')
+      setShowSudoDialog(false)
+      toast.success('Password saved')
+
+      // Retry the pending connection
+      if (pendingConnect) {
+        setPendingConnect(false)
+        setTimeout(() => handleConnect(), 100)
+      }
+    } catch (e) {
+      const err = String(e)
+      if (err.includes('SUDO_PASSWORD_INVALID')) {
+        setSudoError('Wrong password')
+      } else {
+        setSudoError(err)
+      }
+    } finally {
+      setSudoSaving(false)
+    }
+  }
+
+  const connectWithSudoCheck = async (config: VlessConfig): Promise<void> => {
+    if (!invoke) return
+    try {
+      await invoke('start_singbox', { config })
+      setIsConnected(true)
+      setLastStatusError(null)
+    } catch (e) {
+      const err = String(e)
+      if (err.includes('SUDO_PASSWORD_REQUIRED')) {
+        // Show password dialog, retry after
+        setPendingConnect(true)
+        setShowSudoDialog(true)
+        setIsConnecting(false)
+        return
+      }
+      throw e
+    }
+  }
+
   const handleConnect = async () => {
     if (!invoke) return
-    if (isConnecting || isDisconnecting) return // Prevent double-click
+    if (isConnecting || isDisconnecting) return
 
     setError(null)
 
     try {
       if (isConnected) {
-        // Disconnecting
         setIsDisconnecting(true)
         await invoke('stop_singbox')
         setIsConnected(false)
         setLastStatusError(null)
       } else {
-        // Connecting
         setIsConnecting(true)
         if (!currentProfile) {
           setError('Select a profile first')
           setIsConnecting(false)
           return
         }
-        await invoke('start_singbox', { config: currentProfile.config })
-        setIsConnected(true)
-        setLastStatusError(null)
+        await connectWithSudoCheck(currentProfile.config)
       }
     } catch (e) {
       setError(String(e))
@@ -343,6 +426,44 @@ function App() {
     } finally {
       setIsConnecting(false)
       setIsDisconnecting(false)
+    }
+  }
+
+  const handleSwitchServer = async (profileId: string) => {
+    if (!invoke) return
+    if (isConnecting || isDisconnecting) return
+
+    // If clicking the already connected server — do nothing
+    if (profileId === selectedId && isConnected) return
+
+    const targetProfile = profiles.find(p => p.id === profileId)
+    if (!targetProfile) return
+
+    setSelectedId(profileId)
+    setError(null)
+
+    // Disconnect current if connected
+    if (isConnected) {
+      setIsDisconnecting(true)
+      try {
+        await invoke('stop_singbox')
+      } catch {
+        // Ignore disconnect errors during switch
+      }
+      setIsConnected(false)
+      setIsDisconnecting(false)
+    }
+
+    // Always connect to clicked server
+    setIsConnecting(true)
+    try {
+      await connectWithSudoCheck(targetProfile.config)
+    } catch (e) {
+      setError(String(e))
+      setLastStatusError(String(e))
+      setIsConnected(false)
+    } finally {
+      setIsConnecting(false)
     }
   }
 
@@ -424,56 +545,54 @@ function App() {
         </div>
       </header>
 
-      {/* Main Content - 3 Columns */}
-      <main className="main-content">
+      {/* Main Content - 2 Columns */}
+      <main className="main-content two-columns">
         {/* Left Panel - Servers */}
         <section className="servers-panel">
-          <h2 className="panel-title">Servers</h2>
+          <div className="panel-header">
+            <h2 className="panel-title">Servers</h2>
+            {isConnected && (
+              <button
+                className="btn-disconnect"
+                onClick={handleConnect}
+                disabled={isDisconnecting}
+                title="Disconnect"
+              >
+                {isDisconnecting ? '...' : '⏻'}
+              </button>
+            )}
+          </div>
+
+          {(isConnecting || isDisconnecting) && (
+            <div className={`connection-status-bar ${getStatusClass()}`}>
+              {isDisconnecting ? 'Disconnecting...' : 'Connecting...'}
+            </div>
+          )}
 
           <div className="servers-list">
             {profiles.length === 0 ? (
               <div className="empty-state">
-                <div className="empty-state-icon">🔐</div>
-                <p>Add a server to start</p>
+                <p>Add a subscription to get started</p>
               </div>
             ) : (
               profiles.map((profile: Profile) => (
                 <div
                   key={profile.id}
-                  className={`server-card ${selectedId === profile.id ? 'selected' : ''}`}
-                  onClick={() => setSelectedId(profile.id)}
+                  className={`server-card ${selectedId === profile.id ? 'selected' : ''} ${selectedId === profile.id && isConnected ? 'active' : ''}`}
+                  onClick={() => handleSwitchServer(profile.id)}
                 >
-                  <div className="server-name">
-                    {profile.name}
-                    <span className="protocol-badge hy2">
-                      HY2
-                    </span>
+                  <div className="server-info">
+                    <div className="server-name">{profile.name}</div>
+                    <div className="server-address">
+                      {profile.config.address}:{profile.config.port}
+                    </div>
                   </div>
-                  <div className="server-address">
-                    {profile.config.address}:{profile.config.port}
-                  </div>
-                  <button
-                    className="server-delete"
-                    onClick={(e) => handleDeleteProfile(profile.id, e)}
-                  >
-                    ✕
-                  </button>
+                  {selectedId === profile.id && isConnected && (
+                    <span className="server-active-dot" />
+                  )}
                 </div>
               ))
             )}
-          </div>
-
-          <div className="add-server">
-            <input
-              type="text"
-              placeholder="hysteria2:// or hy2:// link"
-              value={linkInput}
-              onChange={(e) => setLinkInput(e.target.value)}
-              onKeyPress={handleKeyPress}
-            />
-            <button className="btn-add" onClick={handleAddProfile}>
-              Add
-            </button>
           </div>
 
           <div className="add-server sub-input">
@@ -489,37 +608,13 @@ function App() {
               onClick={handleFetchSubscription}
               disabled={isFetchingSub || !subUrl.trim()}
             >
-              {isFetchingSub ? '...' : 'Fetch'}
+              {isFetchingSub ? '...' : 'Sync'}
             </button>
           </div>
           {error && <div className="error-message">{error}</div>}
         </section>
 
-        {/* Center Panel - Connect */}
-        <section className="connect-panel">
-          <div className="connect-poster">
-            {/* Mask - clickable connect button */}
-            <div
-              className={`mask-container ${getStatusClass()}`}
-              onClick={handleConnect}
-              title={isConnected ? 'Click to disconnect' : 'Click to connect'}
-            >
-              <img
-                src={isConnected ? '/images/mask-two.png' : '/images/mask.png'}
-                alt={isConnected ? 'Disconnect' : 'Connect'}
-                className="mask-image"
-              />
-              {(isConnecting || isDisconnecting) && (
-                <div className="mask-waiting-text">
-                  <span>PLEASE WAIT</span>
-                  <span>{isDisconnecting ? 'DISCONNECTING' : 'CONNECTING'}</span>
-                </div>
-              )}
-            </div>
-          </div>
-        </section>
-
-        {/* Right Panel - Settings */}
+        {/* Right Panel - Status */}
         <section className="settings-panel">
           <div className="settings-card">
             <h3 className="settings-title">Status</h3>
@@ -587,6 +682,40 @@ function App() {
         currentConfig={currentProfile?.config}
         onUpdateConfig={handleUpdateConfig}
       />
+
+      {/* Sudo password dialog */}
+      {showSudoDialog && (
+        <div className="modal-overlay" onClick={() => { setShowSudoDialog(false); setPendingConnect(false) }}>
+          <div className="modal-content sudo-dialog" onClick={e => e.stopPropagation()}>
+            <h3>System Password Required</h3>
+            <p>VPN requires administrator privileges. Enter your system password to continue.</p>
+            <input
+              type="password"
+              placeholder="System password"
+              value={sudoPassword}
+              onChange={e => setSudoPassword(e.target.value)}
+              onKeyPress={e => e.key === 'Enter' && handleSudoSubmit()}
+              autoFocus
+            />
+            {sudoError && <div className="error-message">{sudoError}</div>}
+            <div className="sudo-dialog-buttons">
+              <button
+                className="btn-add"
+                onClick={handleSudoSubmit}
+                disabled={sudoSaving || !sudoPassword.trim()}
+              >
+                {sudoSaving ? '...' : 'Save & Connect'}
+              </button>
+              <button
+                className="btn-cancel"
+                onClick={() => { setShowSudoDialog(false); setPendingConnect(false); setSudoError(null) }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   )

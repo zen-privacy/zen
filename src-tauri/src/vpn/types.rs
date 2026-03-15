@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 /// Configuration for a Hysteria2 VPN connection
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct VlessConfig {
+pub struct ServerConfig {
     pub uuid: String,
     pub address: String,
     pub port: u16,
@@ -64,7 +64,7 @@ pub struct VlessConfig {
 pub struct Profile {
     pub id: String,
     pub name: String,
-    pub config: VlessConfig,
+    pub config: ServerConfig,
 }
 
 /// Application status regarding sing-box installation

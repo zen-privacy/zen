@@ -5,11 +5,12 @@
 
 pub mod killswitch;
 pub mod manager;
+pub mod platform;
 pub mod process;
 pub mod types;
 
 // Re-export commonly used types for convenience
-pub use types::{AppStatus, Profile, TrafficStats, VlessConfig, RuleSetInfo};
+pub use types::{AppStatus, Profile, TrafficStats, ServerConfig, RuleSetInfo};
 
 // Re-export process management items (used by main.rs)
 pub use process::{
