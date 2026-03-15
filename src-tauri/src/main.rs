@@ -703,7 +703,7 @@ async fn ping_server(address: String) -> Result<u64, String> {
 
     // Validate and extract the hostname/IP from the address
     let target = if address.is_empty() {
-        "1.1.1.1".to_string() // Fallback to Cloudflare DNS
+        vpn::process::DNS_PRIMARY.to_string()
     } else {
         // Remove any port suffix if present
         address.split(':').next().unwrap_or(&address).to_string()
@@ -748,7 +748,7 @@ async fn ping_server(address: String) -> Result<u64, String> {
 async fn ping_server(address: String) -> Result<u64, String> {
     // Validate and extract the hostname/IP from the address
     let target = if address.is_empty() {
-        "1.1.1.1".to_string() // Fallback to Cloudflare DNS
+        vpn::process::DNS_PRIMARY.to_string()
     } else {
         // Remove any port suffix if present
         address.split(':').next().unwrap_or(&address).to_string()

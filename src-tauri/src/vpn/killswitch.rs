@@ -23,6 +23,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+use super::process::{DNS_PRIMARY, DNS_SECONDARY};
+
 /// Kill switch configuration holding the VPN server IP and interface name
 #[derive(Debug, Clone)]
 pub struct KillSwitchConfig {
@@ -468,15 +470,17 @@ nft add rule inet {table} input icmpv6 type echo-reply accept
 nft add rule inet {table} output oifname {tun_iface} udp dport 53 accept
 nft add rule inet {table} output oifname {tun_iface} tcp dport 53 accept
 
-# Allow DNS to common public DNS servers (fallback for connectivity)
-nft add rule inet {table} output ip daddr 1.1.1.1 udp dport 53 accept
-nft add rule inet {table} output ip daddr 8.8.8.8 udp dport 53 accept
-nft add rule inet {table} output ip daddr 1.1.1.1 tcp dport 53 accept
-nft add rule inet {table} output ip daddr 8.8.8.8 tcp dport 53 accept
+# Allow DNS to configured DNS servers (fallback for connectivity)
+nft add rule inet {table} output ip daddr {dns1} udp dport 53 accept
+nft add rule inet {table} output ip daddr {dns2} udp dport 53 accept
+nft add rule inet {table} output ip daddr {dns1} tcp dport 53 accept
+nft add rule inet {table} output ip daddr {dns2} tcp dport 53 accept
 "#,
             table = Self::NFT_TABLE,
             server_ip_rules = server_ip_rules,
-            tun_iface = tun_iface
+            tun_iface = tun_iface,
+            dns1 = DNS_PRIMARY,
+            dns2 = DNS_SECONDARY
         );
 
         let output = self.run_privileged_command(&nft_script)?;
@@ -602,11 +606,11 @@ iptables -A {chain}_INPUT -p icmp --icmp-type echo-reply -j ACCEPT
 iptables -A {chain}_OUTPUT -o {tun_iface} -p udp --dport 53 -j ACCEPT
 iptables -A {chain}_OUTPUT -o {tun_iface} -p tcp --dport 53 -j ACCEPT
 
-# Allow DNS to common public DNS servers (fallback for connectivity)
-iptables -A {chain}_OUTPUT -d 1.1.1.1 -p udp --dport 53 -j ACCEPT
-iptables -A {chain}_OUTPUT -d 8.8.8.8 -p udp --dport 53 -j ACCEPT
-iptables -A {chain}_OUTPUT -d 1.1.1.1 -p tcp --dport 53 -j ACCEPT
-iptables -A {chain}_OUTPUT -d 8.8.8.8 -p tcp --dport 53 -j ACCEPT
+# Allow DNS to configured DNS servers (fallback for connectivity)
+iptables -A {chain}_OUTPUT -d {dns1} -p udp --dport 53 -j ACCEPT
+iptables -A {chain}_OUTPUT -d {dns2} -p udp --dport 53 -j ACCEPT
+iptables -A {chain}_OUTPUT -d {dns1} -p tcp --dport 53 -j ACCEPT
+iptables -A {chain}_OUTPUT -d {dns2} -p tcp --dport 53 -j ACCEPT
 
 # Drop everything else
 iptables -A {chain}_OUTPUT -j DROP
@@ -618,7 +622,9 @@ iptables -I INPUT 1 -j {chain}_INPUT
 "#,
             chain = Self::IPT_CHAIN,
             server_ip_rules = server_ip_rules,
-            tun_iface = tun_iface
+            tun_iface = tun_iface,
+            dns1 = DNS_PRIMARY,
+            dns2 = DNS_SECONDARY
         );
 
         let output = self.run_privileged_command(&ipt_script)?;
@@ -782,8 +788,8 @@ impl WindowsKillSwitch {
     const RULE_ALLOW_DHCP: &'static str = "ZenVPN-Allow-DHCP";
     const RULE_ALLOW_ICMP_OUT: &'static str = "ZenVPN-Allow-ICMP-Out";
     const RULE_ALLOW_ICMP_IN: &'static str = "ZenVPN-Allow-ICMP-In";
-    const RULE_ALLOW_DNS_1: &'static str = "ZenVPN-Allow-DNS-1.1.1.1";
-    const RULE_ALLOW_DNS_2: &'static str = "ZenVPN-Allow-DNS-8.8.8.8";
+    const RULE_ALLOW_DNS_1: &'static str = "ZenVPN-Allow-DNS-Primary";
+    const RULE_ALLOW_DNS_2: &'static str = "ZenVPN-Allow-DNS-Secondary";
 
     /// Create a new Windows kill switch
     pub fn new() -> Self {
@@ -908,14 +914,16 @@ impl WindowsKillSwitch {
             &["dir=in", "action=allow", "protocol=icmpv4:0,any", "enable=yes"],
         )?;
 
-        // 4. Allow DNS to common public DNS servers (for connectivity when tunnel down)
+        // 4. Allow DNS to configured DNS servers (for connectivity when tunnel down)
+        let dns1_rule = format!("remoteip={}", DNS_PRIMARY);
+        let dns2_rule = format!("remoteip={}", DNS_SECONDARY);
         self.add_rule(
             Self::RULE_ALLOW_DNS_1,
-            &["dir=out", "action=allow", "remoteip=1.1.1.1", "protocol=udp", "remoteport=53", "enable=yes"],
+            &["dir=out", "action=allow", &dns1_rule, "protocol=udp", "remoteport=53", "enable=yes"],
         )?;
         self.add_rule(
             Self::RULE_ALLOW_DNS_2,
-            &["dir=out", "action=allow", "remoteip=8.8.8.8", "protocol=udp", "remoteport=53", "enable=yes"],
+            &["dir=out", "action=allow", &dns2_rule, "protocol=udp", "remoteport=53", "enable=yes"],
         )?;
 
         // 5. Allow VPN server IP(s) - resolved from hostname (before blocking takes effect)
@@ -1184,20 +1192,9 @@ impl MacOSKillSwitch {
             .map_err(|e| format!("Failed to execute command: {}", e))
     }
 
-    /// Execute a command with privilege elevation via osascript
+    /// Execute a command with privilege elevation via sudo (uses Keychain password on macOS)
     fn run_privileged_command(&self, cmd: &str) -> Result<std::process::Output, String> {
-        // Use osascript to prompt for admin privileges (macOS native)
-        let escaped = cmd.replace('\\', "\\\\").replace('"', "\\\"");
-        let apple_script = format!(
-            "do shell script \"{}\" with administrator privileges",
-            escaped
-        );
-
-        std::process::Command::new("osascript")
-            .arg("-e")
-            .arg(&apple_script)
-            .output()
-            .map_err(|e| format!("Failed to execute privileged command: {}", e))
+        crate::sudo::sudo_exec(&["sh", "-c", cmd])
     }
 
     /// Resolve a hostname to IP addresses
@@ -1260,16 +1257,18 @@ pass quick on {tun_iface} all
 pass out quick proto udp from any to any port 67
 pass in quick proto udp from any port 67 to any
 
-# Allow DNS to public resolvers (fallback)
-pass out quick proto {{ tcp, udp }} from any to 1.1.1.1 port 53
-pass out quick proto {{ tcp, udp }} from any to 8.8.8.8 port 53
+# Allow DNS to configured DNS servers (fallback)
+pass out quick proto {{ tcp, udp }} from any to {dns1} port 53
+pass out quick proto {{ tcp, udp }} from any to {dns2} port 53
 
 # Block everything else
 block drop out all
 block drop in all
 "#,
             tun_iface = tun_iface,
-            server_pass_rules = server_pass_rules
+            server_pass_rules = server_pass_rules,
+            dns1 = DNS_PRIMARY,
+            dns2 = DNS_SECONDARY
         );
 
         // Write pf rules to config file

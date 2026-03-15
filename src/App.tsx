@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import { useState, useEffect } from 'react'
 import { toast } from 'sonner'
 import { Toaster } from './components/Toaster'
 import { Settings } from './components/Settings'
@@ -78,7 +78,6 @@ interface UpdateInfo {
 function App() {
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [linkInput, setLinkInput] = useState('')
   const [isConnected, setIsConnected] = useState(false)
   const [isConnecting, setIsConnecting] = useState(false)
   const [isDisconnecting, setIsDisconnecting] = useState(false)
@@ -203,31 +202,6 @@ function App() {
     }
   }
 
-
-  const handleAddProfile = async () => {
-    if (!invoke || !linkInput.trim()) return
-    setError(null)
-
-    try {
-      const config = await invoke<VlessConfig>('parse_share_link', { link: linkInput })
-      if (!config.address || !config.uuid || !config.port || config.port < 1 || config.port > 65535) {
-        setError('Invalid profile data (address/port/uuid)')
-        return
-      }
-      const profile: Profile = {
-        id: crypto.randomUUID(),
-        name: config.name,
-        config,
-      }
-      await invoke('save_profile', { profile })
-      setLinkInput('')
-      await loadProfiles()
-      setSelectedId(profile.id)
-    } catch (e) {
-      setError(String(e))
-    }
-  }
-
   const loadSavedSubscription = async () => {
     if (!invoke) return
     try {
@@ -333,21 +307,6 @@ function App() {
       toast.error('Failed to install update', { description: String(e) })
     } finally {
       setInstallingUpdate(false)
-    }
-  }
-
-  const handleDeleteProfile = async (id: string, e: React.MouseEvent<HTMLButtonElement>) => {
-    e.stopPropagation()
-    if (!invoke) return
-
-    try {
-      await invoke('delete_profile', { id })
-      if (selectedId === id) {
-        setSelectedId(null)
-      }
-      await loadProfiles()
-    } catch (e) {
-      setError(String(e))
     }
   }
 
@@ -464,12 +423,6 @@ function App() {
       setIsConnected(false)
     } finally {
       setIsConnecting(false)
-    }
-  }
-
-  const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      handleAddProfile()
     }
   }
 

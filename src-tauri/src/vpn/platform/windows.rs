@@ -19,7 +19,7 @@ use crate::vpn::manager::{ConnectionState, VpnManager};
 use crate::vpn::types::ServerConfig;
 use crate::vpn::process::{
     AppState, get_config_dir, get_singbox_binary_path, get_singbox_config_path,
-    get_log_path, clear_log_file, resolve_server_ip, generate_singbox_config,
+    get_log_path, resolve_server_ip, generate_singbox_config,
     spawn_auto_reconnect_monitor, cleanup_firewall, check_process_health,
     ProcessHealthStatus, GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
 };
@@ -164,7 +164,7 @@ pub async fn platform_reconnect_singbox(
     state: &AppState,
     config: &ServerConfig,
 ) -> Result<(), String> {
-    clear_log_file()?;
+    // Log file is appended, not cleared on reconnect — preserves pre-reconnect logs for diagnostics
 
     let config_json = generate_singbox_config(config.clone())?;
     let config_dir = get_config_dir();
@@ -179,7 +179,9 @@ pub async fn platform_reconnect_singbox(
     }
 
     let log_path = get_log_path();
-    let log_file = fs::File::create(&log_path).map_err(|e| e.to_string())?;
+    let log_file = fs::OpenOptions::new()
+        .create(true).append(true).open(&log_path)
+        .map_err(|e| e.to_string())?;
 
     let child = Command::new(&singbox_path)
         .creation_flags(CREATE_NO_WINDOW)

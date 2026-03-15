@@ -34,6 +34,20 @@ pub const RECONNECT_MAX_DELAY_MS: u64 = 30000;
 /// Default timeout for graceful shutdown before force kill (in seconds)
 pub const GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
 
+/// DNS servers used in sing-box config and killswitch firewall rules.
+/// Primary: used for both remote (through proxy) and local (direct) DNS resolution.
+/// Secondary: used as fallback in connectivity probes and killswitch allow-rules.
+pub const DNS_PRIMARY: &str = "223.5.5.5";
+pub const DNS_SECONDARY: &str = "223.6.6.6";
+
+/// Targets for connectivity probes (TCP connect to verify tunnel is alive).
+/// Must be reliably reachable from the VPN server.
+pub const CONNECTIVITY_PROBE_TARGETS: &[(&str, u16)] = &[
+    (DNS_PRIMARY, 443),
+    (DNS_SECONDARY, 53),
+    ("93.184.216.34", 80), // example.com
+];
+
 /// Number of consecutive connectivity probe failures before triggering self-heal restart
 const CONNECTIVITY_FAIL_THRESHOLD: u32 = 3;
 
@@ -317,10 +331,6 @@ pub fn generate_singbox_config(config: ServerConfig) -> Result<String, String> {
             });
         }
     }
-    if let Some(timeout) = udp_timeout {
-        proxy_outbound["udp_timeout"] = serde_json::json!(format!("{}s", timeout));
-    }
-
     let singbox_config = serde_json::json!({
         "log": {
             "level": "debug",
@@ -332,21 +342,21 @@ pub fn generate_singbox_config(config: ServerConfig) -> Result<String, String> {
                     serde_json::json!({
                         "tag": "remote",
                         "type": "udp",
-                        "server": "1.1.1.1",
+                        "server": DNS_PRIMARY,
                         "detour": "proxy"
                     })
                 } else {
                     serde_json::json!({
                         "tag": "remote",
                         "type": "tls",
-                        "server": "1.1.1.1",
+                        "server": DNS_PRIMARY,
                         "detour": "proxy"
                     })
                 },
                 {
                     "tag": "local",
                     "type": "udp",
-                    "server": "8.8.8.8"
+                    "server": DNS_PRIMARY
                 }
             ],
             "rules": [],
@@ -559,7 +569,7 @@ pub fn check_process_health(_state: &AppState) -> ProcessHealthStatus {
 
 /// Perform a ping check to verify network connectivity through the VPN
 pub async fn perform_ping_check(target: Option<&str>, timeout_ms: Option<u64>) -> Result<u64, String> {
-    let target = target.unwrap_or("1.1.1.1");
+    let target = target.unwrap_or(DNS_PRIMARY);
     let timeout = timeout_ms.unwrap_or(5000);
 
     #[cfg(target_os = "windows")]
@@ -621,13 +631,9 @@ pub async fn perform_ping_check(target: Option<&str>, timeout_ms: Option<u64>) -
 /// This is more reliable than ping — it doesn't require root and works through TUN.
 /// Tries to TCP-connect to well-known hosts. If all fail, the tunnel is broken.
 pub async fn connectivity_probe() -> bool {
-    let targets = [
-        ("1.1.1.1", 443),
-        ("8.8.8.8", 53),
-        ("93.184.216.34", 80), // example.com
-    ];
+    let targets = CONNECTIVITY_PROBE_TARGETS;
 
-    for (host, port) in &targets {
+    for (host, port) in targets {
         let addr = format!("{}:{}", host, port);
         let timeout = Duration::from_secs(5);
 
@@ -1274,11 +1280,11 @@ mod tests {
         assert_eq!(dns_servers.len(), 2);
         assert_eq!(dns_servers[0]["tag"], "remote");
         assert_eq!(dns_servers[0]["type"], "tls");
-        assert_eq!(dns_servers[0]["server"], "1.1.1.1");
+        assert_eq!(dns_servers[0]["server"], DNS_PRIMARY);
         assert_eq!(dns_servers[0]["detour"], "proxy");
         assert_eq!(dns_servers[1]["tag"], "local");
         assert_eq!(dns_servers[1]["type"], "udp");
-        assert_eq!(dns_servers[1]["server"], "8.8.8.8");
+        assert_eq!(dns_servers[1]["server"], DNS_PRIMARY);
         assert_eq!(v["dns"]["final"], "remote");
         assert_eq!(v["dns"]["strategy"], "ipv4_only");
     }
@@ -1421,6 +1427,46 @@ mod tests {
         assert_eq!(config.down_mbps, None);
         assert_eq!(config.obfs, None);
         assert_eq!(config.obfs_password, None);
+    }
+
+    #[test]
+    fn test_gen_outbound_no_udp_timeout() {
+        // sing-box Hysteria2 outbound does not support udp_timeout — only inbound does
+        let config = make_hy2_config();
+        let json_str = generate_singbox_config(config).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        let proxy = &v["outbounds"][0];
+        assert!(proxy.get("udp_timeout").is_none(),
+            "Hysteria2 outbound must NOT have udp_timeout (sing-box rejects it)");
+
+        // But inbound must have it
+        let inbound = &v["inbounds"][0];
+        assert_eq!(inbound["udp_timeout"], "5m0s",
+            "TUN inbound must have udp_timeout for stable UDP flows");
+    }
+
+    #[test]
+    fn test_gen_tun_stack_default() {
+        let config = make_hy2_config();
+        let json_str = generate_singbox_config(config).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        let inbound = &v["inbounds"][0];
+        let stack = inbound["stack"].as_str().unwrap();
+        assert_eq!(stack, platform::TUN_DEFAULT_STACK,
+            "Generated config must use platform default stack");
+    }
+
+    #[test]
+    fn test_gen_endpoint_independent_nat() {
+        let config = make_hy2_config();
+        let json_str = generate_singbox_config(config).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        let inbound = &v["inbounds"][0];
+        assert_eq!(inbound["endpoint_independent_nat"], true,
+            "endpoint_independent_nat must be true for STUN/WebRTC (calls)");
     }
 
     #[test]

@@ -45,7 +45,7 @@ pub struct ServerConfig {
     /// Override TUN stack: "system", "gvisor", "mixed".
     #[serde(default)]
     pub diag_stack: Option<String>,
-    /// Disable DNS hijacking — use plain UDP to 1.1.1.1 instead of DoT.
+    /// Disable DNS hijacking — use plain UDP instead of DoT.
     #[serde(default)]
     pub diag_plain_dns: Option<bool>,
     /// UDP timeout in seconds for proxy outbound (default: sing-box ~300s). Try 600.

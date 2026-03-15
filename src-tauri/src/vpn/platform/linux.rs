@@ -17,7 +17,7 @@ use crate::vpn::manager::{ConnectionState, VpnManager};
 use crate::vpn::types::ServerConfig;
 use crate::vpn::process::{
     AppState, get_config_dir, get_singbox_binary_path, get_singbox_config_path,
-    get_log_path, clear_log_file, resolve_server_ip, generate_singbox_config,
+    get_log_path, resolve_server_ip, generate_singbox_config,
     copy_resource_file, spawn_log_reader, spawn_auto_reconnect_monitor,
     auto_enable_killswitch, cleanup_firewall, check_process_health,
     ProcessHealthStatus, GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
@@ -83,12 +83,7 @@ pub async fn platform_start_singbox(
     let log_path = get_log_path();
 
     // Use sudo with saved password instead of pkexec (no GUI dialog)
-    let cmd = format!(
-        "{} run -c '{}' > '{}' 2>&1",
-        singbox_path.to_string_lossy(),
-        config_path.to_string_lossy(),
-        log_path.to_string_lossy()
-    );
+    let cmd = build_singbox_run_cmd(&singbox_path, &config_path, &log_path);
 
     let std_child = crate::sudo::sudo_spawn(&["sh", "-c", &cmd])
         .map_err(|e| {
@@ -178,7 +173,7 @@ pub async fn platform_reconnect_singbox(
     state: &AppState,
     config: &ServerConfig,
 ) -> Result<(), String> {
-    clear_log_file()?;
+    // Log file is appended, not cleared on reconnect — preserves pre-reconnect logs for diagnostics
 
     let config_json = generate_singbox_config(config.clone())?;
     let config_dir = get_config_dir();
@@ -193,13 +188,7 @@ pub async fn platform_reconnect_singbox(
     }
 
     let log_path = get_log_path();
-
-    let cmd = format!(
-        "{} run -c '{}' > '{}' 2>&1",
-        singbox_path.to_string_lossy(),
-        config_path.to_string_lossy(),
-        log_path.to_string_lossy()
-    );
+    let cmd = build_singbox_run_cmd(&singbox_path, &config_path, &log_path);
 
     let _std_child = crate::sudo::sudo_spawn(&["sh", "-c", &cmd])
         .map_err(|e| format!("Failed to start sing-box: {}", e))?;
@@ -283,3 +272,39 @@ pub const TUN_INTERFACE_NAME: &str = "zen-tun";
 pub const TUN_ADDRESS: &str = "100.64.0.1/30";
 pub const TUN_STRICT_ROUTE: bool = true;
 pub const TUN_DEFAULT_STACK: &str = "gvisor";
+
+/// Build the shell command for running sing-box.
+/// All paths MUST be single-quoted to handle spaces.
+pub fn build_singbox_run_cmd(
+    singbox_path: &std::path::Path,
+    config_path: &std::path::Path,
+    log_path: &std::path::Path,
+) -> String {
+    format!(
+        "'{}' run -c '{}' >> '{}' 2>&1",
+        singbox_path.to_string_lossy(),
+        config_path.to_string_lossy(),
+        log_path.to_string_lossy()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_build_cmd_quotes_all_paths() {
+        let cmd = build_singbox_run_cmd(
+            &PathBuf::from("/opt/my app/sing-box"),
+            &PathBuf::from("/home/user/.config/zen vpn/config.json"),
+            &PathBuf::from("/home/user/.config/zen vpn/singbox.log"),
+        );
+        assert!(cmd.starts_with("'/opt/my app/sing-box'"),
+            "singbox_path must be single-quoted. Got: {}", cmd);
+        assert!(cmd.contains("-c '/home/user/.config/zen vpn/config.json'"),
+            "config_path must be single-quoted. Got: {}", cmd);
+        assert!(cmd.contains(">> '/home/user/.config/zen vpn/singbox.log'"),
+            "log_path must be single-quoted. Got: {}", cmd);
+    }
+}
