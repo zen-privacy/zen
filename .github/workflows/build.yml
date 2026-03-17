@@ -157,8 +157,8 @@ jobs:
           WIN_FILE=$(find artifacts -name "*.exe" -type f | head -n1)
           DEB_FILE=$(find artifacts -name "*.deb" -type f | head -n1)
           RPM_FILE=$(find artifacts -name "*.rpm" -type f | head -n1)
-          DMG_AARCH64_FILE=$(find artifacts -name "*aarch64*" -o -name "*arm64*" | head -n1)
-          DMG_X64_FILE=$(find artifacts -name "*x64*" -o -name "*x86_64*" | grep "\.dmg$" | head -n1)
+          DMG_AARCH64_FILE=$(find artifacts -name "*aarch64*.dmg" -type f | head -n1)
+          DMG_X64_FILE=$(find artifacts -name "*x86_64*.dmg" -type f | head -n1)
 
           # If we can't distinguish by name, just grab them in order
           if [ -z "$DMG_AARCH64_FILE" ] || [ -z "$DMG_X64_FILE" ]; then
@@ -217,7 +217,7 @@ jobs:
           cat manifest.json
 
       - name: Create Release (public repo)
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           repository: zen-privacy/releases
           tag_name: ${{ github.ref_name }}
