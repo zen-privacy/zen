@@ -5960,7 +5960,7 @@ dependencies = [
 
 [[package]]
 name = "zen-privacy"
-version = "2.3.0"
+version = "2.3.2"
 dependencies = [
  "aes-gcm",
  "backon",
