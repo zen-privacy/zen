@@ -186,7 +186,7 @@ jobs:
           DMG_AARCH64_NAME=$(basename "$DMG_AARCH64_FILE")
           DMG_X64_NAME=$(basename "$DMG_X64_FILE")
 
-          BASE_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}"
+          BASE_URL="https://github.com/zen-privacy/releases/releases/download/${{ github.ref_name }}"
 
           jq -n \
             --arg version "$VERSION" \
@@ -216,13 +216,20 @@ jobs:
           echo "=== Generated manifest.json ==="
           cat manifest.json
 
-      - name: Create Release
+      - name: Create Release (public repo)
         uses: softprops/action-gh-release@v1
         with:
+          repository: zen-privacy/releases
+          tag_name: ${{ github.ref_name }}
+          token: ${{ secrets.RELEASES_TOKEN }}
           files: |
             artifacts/linux/**/*.deb
             artifacts/linux/**/*.rpm
             artifacts/windows/*.exe
             artifacts/macos/*.dmg
             manifest.json
-          generate_release_notes: true
+          generate_release_notes: false
+          body: |
+            ## Zen Privacy ${{ github.ref_name }}
+
+            Download the installer for your platform below.
