@@ -58,8 +58,12 @@ pub async fn platform_start_singbox(
         e.to_string()
     })?;
 
+    // CWD must be config_dir so sing-box finds wintun.dll next to itself
+    let config_dir = get_config_dir();
+
     let child = Command::new(&singbox_path)
         .creation_flags(CREATE_NO_WINDOW)
+        .current_dir(&config_dir)
         .args(["run", "-c", &config_path.to_string_lossy()])
         .stdout(log_file.try_clone().map_err(|e| e.to_string())?)
         .stderr(log_file)
@@ -185,6 +189,7 @@ pub async fn platform_reconnect_singbox(
 
     let child = Command::new(&singbox_path)
         .creation_flags(CREATE_NO_WINDOW)
+        .current_dir(&config_dir)
         .args(["run", "-c", &config_path.to_string_lossy()])
         .stdout(log_file.try_clone().map_err(|e| e.to_string())?)
         .stderr(log_file)
