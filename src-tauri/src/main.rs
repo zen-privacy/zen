@@ -1116,6 +1116,11 @@ fn get_killswitch_status() -> KillSwitchStatus {
     }
 }
 
+#[tauri::command]
+fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -1156,7 +1161,8 @@ fn main() {
             enable_killswitch,
             disable_killswitch,
             get_killswitch_status,
-            check_for_update
+            check_for_update,
+            get_app_version
         ])
         .setup(|app| {
             // Attempt to recover from previous crash by cleaning up stale killswitch rules

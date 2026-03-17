@@ -97,6 +97,7 @@ function App() {
   const [isFetchingSub, setIsFetchingSub] = useState(false)
   const [showSudoDialog, setShowSudoDialog] = useState(false)
   const [sudoPassword, setSudoPassword] = useState('')
+  const [appVersion, setAppVersion] = useState('')
   const [sudoSaving, setSudoSaving] = useState(false)
   const [sudoError, setSudoError] = useState<string | null>(null)
   const [pendingConnect, setPendingConnect] = useState(false)
@@ -109,6 +110,7 @@ function App() {
     loadRuleSets()
     loadSavedSubscription()
     handleCheckUpdate()
+    invoke<string>('get_app_version').then(v => setAppVersion(v)).catch(() => {})
 
     const handleVisibility = () => setIsVisible(!document.hidden)
     document.addEventListener('visibilitychange', handleVisibility)
@@ -617,7 +619,7 @@ function App() {
             )}
 
             <div className="version-info">
-              v{updateInfo?.current_version || '0.1.6'}
+              v{appVersion || updateInfo?.current_version || '?'}
               {updateInfo?.available && ` → ${updateInfo.latest_version}`}
             </div>
           </div>
