@@ -1,6 +1,6 @@
 [package]
 name = "zen-privacy"
-version = "2.2.0-beta"
+version = "2.3.0"
 description = "Zen Privacy - Privacy protection client"
 authors = ["you"]
 edition = "2021"

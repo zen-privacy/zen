@@ -23,7 +23,7 @@ use vpn::{
     get_available_rule_sets, get_connection_status, kill_singbox_sync, recover_killswitch, start_singbox,
     stop_singbox, AppState, AppStatus, KillSwitchConfig, Profile, TrafficStats, ServerConfig,
 };
-use updates::{check_for_update, install_update};
+use updates::check_for_update;
 
 const SINGBOX_VERSION: &str = "1.12.20";
 
@@ -1156,8 +1156,7 @@ fn main() {
             enable_killswitch,
             disable_killswitch,
             get_killswitch_status,
-            check_for_update,
-            install_update
+            check_for_update
         ])
         .setup(|app| {
             // Attempt to recover from previous crash by cleaning up stale killswitch rules

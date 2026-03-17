@@ -1,13 +1,10 @@
 use reqwest::Client;
 use semver::Version;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
-use std::path::PathBuf;
-use std::{env, fs};
-use tauri::AppHandle;
+use std::env;
 
 const MANIFEST_URL: &str =
-    "https://github.com/zen-privacy/zen/releases/latest/download/manifest.json";
+    "https://github.com/zen-privacy/releases/releases/latest/download/manifest.json";
 
 #[derive(Deserialize, Debug, Clone)]
 struct AssetEntry {
@@ -39,14 +36,15 @@ struct Manifest {
 
 #[derive(serde::Serialize)]
 pub struct UpdateInfo {
-    available: bool,
-    current_version: String,
-    latest_version: String,
-    notes: Option<String>,
-    asset_url: Option<String>,
-    sha256: Option<String>,
-    platform: String,
-    downloaded_path: Option<String>,
+    pub available: bool,
+    pub current_version: String,
+    pub latest_version: String,
+    pub notes: Option<String>,
+    /// Direct download URL for the platform-specific installer
+    pub asset_url: Option<String>,
+    /// GitHub releases page URL (for manual download)
+    pub release_url: String,
+    pub platform: String,
 }
 
 fn current_version() -> String {
@@ -96,9 +94,12 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
     let (platform, asset_opt) = choose_platform_asset(&manifest);
 
     let available = latest > current && asset_opt.is_some();
-    let (asset_url, sha256) = asset_opt
-        .map(|a| (Some(a.url), a.sha256))
-        .unwrap_or((None, None));
+    let asset_url = asset_opt.map(|a| a.url);
+
+    let release_url = format!(
+        "https://github.com/zen-privacy/releases/releases/tag/v{}",
+        manifest.version
+    );
 
     Ok(UpdateInfo {
         available,
@@ -106,147 +107,8 @@ pub async fn check_for_update() -> Result<UpdateInfo, String> {
         latest_version: manifest.version,
         notes: manifest.notes,
         asset_url,
-        sha256,
+        release_url,
         platform,
-        downloaded_path: None,
     })
-}
-
-#[tauri::command]
-pub async fn install_update(_app: AppHandle) -> Result<UpdateInfo, String> {
-    let info = check_for_update().await?;
-    if !info.available {
-        return Ok(info);
-    }
-
-    let asset_url = info
-        .asset_url
-        .clone()
-        .ok_or_else(|| "No asset for this platform".to_string())?;
-
-    // Download to app cache dir
-    let cache_dir = env::temp_dir().join("zen-vpn-cache");
-    fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
-
-    let filename = asset_url
-        .split('/')
-        .last()
-        .unwrap_or("update.bin")
-        .to_string();
-    let target_path: PathBuf = cache_dir.join(filename);
-
-    let client = Client::new();
-    let mut resp = client
-        .get(&asset_url)
-        .send()
-        .await
-        .map_err(|e| format!("Download failed: {}", e))?;
-
-    let mut file = std::fs::File::create(&target_path).map_err(|e| e.to_string())?;
-    let mut hasher = Sha256::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| format!("Download read failed: {}", e))?
-    {
-        use std::io::Write;
-        file.write_all(&chunk).map_err(|e| e.to_string())?;
-        hasher.update(&chunk);
-    }
-    
-    // Explicitly close the file before launching installer
-    drop(file);
-
-    // Verify sha256 if provided
-    if let Some(expected) = info.sha256.as_ref() {
-        let actual_hex = format!("{:x}", hasher.finalize());
-        if !expected.eq_ignore_ascii_case(&actual_hex) {
-            return Err(format!(
-                "SHA256 mismatch. Expected {}, got {}",
-                expected, actual_hex
-            ));
-        }
-    }
-
-    // Windows: launch NSIS installer then exit app
-    #[cfg(target_os = "windows")]
-    {
-        if target_path
-            .extension()
-            .and_then(|s| s.to_str())
-            .map(|s| s.eq_ignore_ascii_case("exe"))
-            .unwrap_or(false)
-        {
-            let path_str = target_path.to_string_lossy().to_string();
-            
-            // Use ShellExecuteW for proper UAC elevation
-            use std::os::windows::ffi::OsStrExt;
-            use std::ffi::OsStr;
-            
-            let path_wide: Vec<u16> = OsStr::new(&path_str)
-                .encode_wide()
-                .chain(std::iter::once(0))
-                .collect();
-            let verb_wide: Vec<u16> = OsStr::new("runas")
-                .encode_wide()
-                .chain(std::iter::once(0))
-                .collect();
-            
-            unsafe {
-                let result = windows::Win32::UI::Shell::ShellExecuteW(
-                    None,
-                    windows::core::PCWSTR(verb_wide.as_ptr()),
-                    windows::core::PCWSTR(path_wide.as_ptr()),
-                    None,
-                    None,
-                    windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
-                );
-                
-                // ShellExecuteW returns > 32 on success
-                if result.0 as usize > 32 {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    std::process::exit(0);
-                } else {
-                    return Err(format!(
-                        "ShellExecuteW failed. Code: {:?}, Path: {}",
-                        result.0, path_str
-                    ));
-                }
-            }
-        }
-    }
-
-    // macOS: mount DMG and open the app
-    #[cfg(target_os = "macos")]
-    {
-        if target_path
-            .extension()
-            .and_then(|s| s.to_str())
-            .map(|s| s.eq_ignore_ascii_case("dmg"))
-            .unwrap_or(false)
-        {
-            let path_str = target_path.to_string_lossy().to_string();
-            // Open the DMG — macOS will mount it and the user can drag to Applications
-            let result = std::process::Command::new("open")
-                .arg(&path_str)
-                .spawn();
-
-            match result {
-                Ok(_) => {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    std::process::exit(0);
-                }
-                Err(e) => {
-                    return Err(format!("Failed to open DMG: {}", e));
-                }
-            }
-        }
-    }
-
-    // Linux: we only download; installation (deb/rpm) typically requires root.
-
-    let mut out = info;
-    out.downloaded_path = Some(target_path.to_string_lossy().to_string());
-    Ok(out)
 }
 

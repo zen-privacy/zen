@@ -70,9 +70,8 @@ interface UpdateInfo {
   latest_version: string
   notes?: string | null
   asset_url?: string | null
-  sha256?: string | null
+  release_url: string
   platform: string
-  downloaded_path?: string | null
 }
 
 function App() {
@@ -92,7 +91,6 @@ function App() {
   const currentProfile = selectedId ? profiles.find(p => p.id === selectedId) : null
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
   const [checkingUpdate, setCheckingUpdate] = useState(false)
-  const [installingUpdate, setInstallingUpdate] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [ruleSets, setRuleSets] = useState<RuleSetInfo[]>([])
   const [subUrl, setSubUrl] = useState('')
@@ -288,26 +286,10 @@ function App() {
     }
   }
 
-  const handleInstallUpdate = async () => {
-    if (!invoke) return
-    setInstallingUpdate(true)
-    try {
-      const info = await invoke<UpdateInfo>('install_update')
-      setUpdateInfo(info)
-      if (info.downloaded_path) {
-        toast.success('Update downloaded', {
-          description: info.platform.startsWith('windows')
-            ? 'Installer launched'
-            : `Saved to: ${info.downloaded_path}`,
-        })
-      } else {
-        toast.error('Download failed')
-      }
-    } catch (e) {
-      toast.error('Failed to install update', { description: String(e) })
-    } finally {
-      setInstallingUpdate(false)
-    }
+  const handleOpenDownload = () => {
+    if (!updateInfo) return
+    const url = updateInfo.asset_url || updateInfo.release_url
+    window.open(url, '_blank')
   }
 
   const handleSudoSubmit = async () => {
@@ -607,16 +589,32 @@ function App() {
           <div className="settings-card updates-section">
             <h3 className="settings-title">Updates</h3>
 
-            <button
-              className="btn-update"
-              onClick={updateInfo?.available ? handleInstallUpdate : handleCheckUpdate}
-              disabled={checkingUpdate || installingUpdate}
-            >
-              {checkingUpdate ? 'Checking...' :
-                installingUpdate ? 'Installing...' :
-                  updateInfo?.available ? `Install ${updateInfo.latest_version}` :
-                    'Check Updates'}
-            </button>
+            {updateInfo?.available ? (
+              <>
+                <button
+                  className="btn-update"
+                  onClick={handleOpenDownload}
+                >
+                  Download {updateInfo.latest_version}
+                </button>
+                <a
+                  className="release-link"
+                  href={updateInfo.release_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  View release page
+                </a>
+              </>
+            ) : (
+              <button
+                className="btn-update"
+                onClick={handleCheckUpdate}
+                disabled={checkingUpdate}
+              >
+                {checkingUpdate ? 'Checking...' : 'Check Updates'}
+              </button>
+            )}
 
             <div className="version-info">
               v{updateInfo?.current_version || '0.1.6'}

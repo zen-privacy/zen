@@ -1264,3 +1264,17 @@ body {
   background: rgba(255,255,255,0.05);
 }
 
+.release-link {
+  display: block;
+  text-align: center;
+  font-size: 0.8rem;
+  color: rgba(255,255,255,0.5);
+  text-decoration: none;
+  margin-top: 6px;
+}
+
+.release-link:hover {
+  color: var(--red-primary);
+  text-decoration: underline;
+}
+
